@@ -25,7 +25,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "example": "tsx examples/quickstart.ts"
+    "example": "tsx examples/quickstart.ts",
+    "bridge": "tsx examples/studio-bridge.ts"
   },
   "keywords": [
     "ai",

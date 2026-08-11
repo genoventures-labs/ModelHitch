@@ -6,6 +6,10 @@ export { defaultProviders } from './registry.js';
 export { MemoryKeyStore } from './storage/memory.js';
 export { LocalStorageKeyStore } from './storage/local-storage.js';
 
+// OpenAI-compatible bridge server (agentic IDEs: Android Studio, JetBrains, ...)
+export { OpenAICompatibleServer, createModelHitchServer } from './server/server.js';
+export type { ModelHitchServerOptions } from './server/server.js';
+
 export {
   // Provider framework
   createOpenAICompatibleProvider,

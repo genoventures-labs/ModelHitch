@@ -215,6 +215,64 @@ export const myGateway = createOpenAICompatibleProvider({
 Implement the full `Provider` interface (`chat`, `stream`, `capabilities`, optional `listModels`)
 for anything else.
 
+## Agentic IDE bridge (Android Studio, JetBrains, ...)
+
+ModelHitch can serve as a **local OpenAI-compatible endpoint**, so agentic IDEs that accept a
+"custom model endpoint" can drive every registered provider — tools, multi-turn roles, and SSE
+streaming included. This is how you run Android Studio's Agent Mode against OpenCode Zen/Go,
+Anthropic, Ollama, or any other harness provider.
+
+```bash
+npx tsx examples/studio-bridge.ts   # or: npm run bridge
+```
+
+```
+=== ModelHitch bridge listening on http://127.0.0.1:3939 ===
+
+Point Android Studio's custom model endpoint at:
+  Base URL:   http://127.0.0.1:3939/v1
+  API key:    any value (keys are resolved locally, never sent out)
+```
+
+Then, in Android Studio: **Settings → Gemini → model endpoint (or your IDE's custom endpoint
+setting)** → paste `http://127.0.0.1:3939/v1`. Model ids from `GET /v1/models` show up in the
+picker; keys are resolved per provider on your machine (`apiKeys` map → `KeyStore` → env var),
+never sent anywhere.
+
+**Model routing** — prefix a model id with a provider to target it explicitly; bare ids go to the
+default provider:
+
+| Request model | Routes to |
+| --- | --- |
+| `opencode-zen/big-pickle` | OpenCode Zen, model `big-pickle` |
+| `opencode-go/deepseek-v4-flash` | OpenCode Go, model `deepseek-v4-flash` |
+| `anthropic/claude-sonnet-4-5` | Anthropic, model `claude-sonnet-4-5` |
+| `ollama/llama3.2` | local Ollama |
+| `big-pickle` (no prefix) | default provider's `big-pickle` |
+
+```ts
+import { createModelHitchServer, OPENCODE_GO_MODELS, OPENCODE_ZEN_MODELS } from 'modelhitch';
+
+const server = createModelHitchServer({
+  defaultProviderId: 'opencode-zen',
+  staticModels: {           // advertise curated lists in GET /v1/models
+    'opencode-zen': [...OPENCODE_ZEN_MODELS],
+    'opencode-go': [...OPENCODE_GO_MODELS],
+  },
+  logger: console.log,      // one line per request
+});
+const { url } = await server.listen(3939, '127.0.0.1');
+```
+
+Endpoints: `POST /v1/chat/completions` (stream + non-stream), `GET /v1/models[/:id]`,
+`GET /healthz`. Errors come back in the OpenAI envelope (`{ error: { message, type, code } }`)
+with mapped statuses (401 missing/invalid key, 429 rate limit, 404 model not found, 502 upstream).
+
+> The bridge makes the agent *loop* possible, but tool-call *quality* is the model's job —
+> models without function-calling training will still emit prose instead of JSON tool calls.
+> Google-specific extras (native AGENTS.md scanning, Gemini Interactions caching, AppFunctions)
+> remain on Studio's first-party path; the bridge covers the BYOK endpoint route.
+
 ## Development
 
 ```bash
@@ -224,12 +282,14 @@ npm test            # vitest run
 npm run build       # tsup → dist (ESM + CJS + types)
 npm run example     # runs with the mock provider; set OPENCODE_ZEN_API_KEY or
                     # OPENCODE_GO_API_KEY to hit the real gateways
+npm run bridge      # local OpenAI-compatible endpoint for agentic IDEs
 ```
 
 ## Roadmap
 
 * Native Zen adapters for `/responses` (GPT family) and `/messages` (Claude family) routing
 * Streaming tool-call chaining helper
+* `tool_choice` / `response_format` passthrough on the bridge
 * Usage/cost tracking hooks
 * React hooks (`useChat`, `useStream`) for the BYOK UI
 * More local providers (vLLM, llama.cpp, KoboldCpp)
