@@ -1,0 +1,390 @@
+import { ModelHitchError } from '../core/errors.js';
+import type {
+  Capabilities,
+  ChatParams,
+  ChatResult,
+  ContentPart,
+  ModelMessage,
+  ProviderCredentials,
+  StreamChunk,
+  ToolCall,
+  Usage,
+} from '../core/types.js';
+import { safeJsonParse } from '../core/json.js';
+import { bodyToAsyncIterable, parseSSE, requireBody } from '../core/stream.js';
+import type { ModelInfo, Provider } from './types.js';
+
+export interface OpenAICompatibleConfig {
+  /** Unique provider id, e.g. "opencode-zen". */
+  id: string;
+  /** Human-readable name. */
+  name: string;
+  /** Default model id used when the caller doesn't specify one. */
+  defaultModel: string;
+  /** Base URL including the version segment, e.g. "https://api.openai.com/v1". */
+  baseUrl: string;
+  /** Primary env var to read the API key from as a fallback. */
+  apiKeyEnvVar?: string;
+  /** Additional env vars checked when the primary one is unset. */
+  apiKeyEnvFallbacks?: string[];
+  /** Set false for local endpoints that don't need a key (e.g. LM Studio). */
+  requiresKey?: boolean;
+  capabilities?: Partial<Capabilities>;
+  /** Extra headers to send with every request. */
+  headers?: Record<string, string>;
+  /** Injectable fetch for tests and edge runtimes. */
+  fetchImpl?: typeof fetch;
+}
+
+interface OpenAIContentPart {
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+}
+
+interface OpenAIToolCall {
+  id?: string;
+  index?: number;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+interface OpenAIMessage {
+  role: string;
+  content: string | OpenAIContentPart[];
+  name?: string;
+  tool_calls?: OpenAIToolCall[];
+  tool_call_id?: string;
+}
+
+interface OpenAIUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
+
+interface OpenAIStreamChoice {
+  index?: number;
+  delta?: Partial<OpenAIMessage>;
+  finish_reason?: string | null;
+}
+
+interface OpenAIStreamChunk {
+  choices?: OpenAIStreamChoice[];
+  usage?: OpenAIUsage;
+}
+
+interface OpenAIChatCompletion {
+  choices?: Array<{
+    message?: OpenAIMessage;
+    finish_reason?: string | null;
+  }>;
+  usage?: OpenAIUsage;
+  model?: string;
+}
+
+function toOpenAIContent(content: string | ContentPart[]): string | OpenAIContentPart[] {
+  if (typeof content === 'string') return content;
+  return content.map((part) => {
+    if (part.type === 'text') return { type: 'text', text: part.text };
+    if (part.type === 'image') return { type: 'image_url', image_url: { url: part.imageUrl } };
+    return { type: 'image_url', image_url: { url: `data:${part.mimeType};base64,${part.data}` } };
+  });
+}
+
+function toOpenAIMessages(messages: ModelMessage[]): OpenAIMessage[] {
+  return messages.map((m) => {
+    switch (m.role) {
+      case 'system':
+      case 'user':
+        return { role: m.role, content: toOpenAIContent(m.content), name: m.name };
+      case 'assistant':
+        return {
+          role: 'assistant',
+          content: toOpenAIContent(m.content),
+          tool_calls: m.toolCalls?.map((tc) => ({
+            id: tc.id,
+            type: 'function',
+            function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+          })),
+        };
+      case 'tool':
+        return { role: 'tool', content: m.content, tool_call_id: m.toolCallId };
+    }
+  });
+}
+
+function toOpenAITools(tools: ChatParams['tools']): Array<{ type: string; function: unknown }> | undefined {
+  if (!tools?.length) return undefined;
+  return tools.map((t) => ({ type: 'function', function: t }));
+}
+
+function toUsage(u?: OpenAIUsage): Usage | undefined {
+  if (!u) return undefined;
+  const usage: Usage = {};
+  if (u.prompt_tokens !== undefined) usage.inputTokens = u.prompt_tokens;
+  if (u.completion_tokens !== undefined) usage.outputTokens = u.completion_tokens;
+  if (u.total_tokens !== undefined) usage.totalTokens = u.total_tokens;
+  return Object.keys(usage).length ? usage : undefined;
+}
+
+function mapFinishReason(reason?: string | null): string {
+  switch (reason) {
+    case undefined:
+    case null:
+    case 'stop':
+      return 'stop';
+    case 'length':
+      return 'length';
+    case 'tool_calls':
+      return 'tool-calls';
+    case 'content_filter':
+      return 'content-filter';
+    default:
+      return reason;
+  }
+}
+
+function toToolCalls(toolCalls?: OpenAIToolCall[]): ToolCall[] | undefined {
+  if (!toolCalls?.length) return undefined;
+  return toolCalls.map((tc, i) => ({
+    id: tc.id ?? `call_${i}`,
+    name: tc.function?.name ?? 'unknown',
+    arguments: safeJsonParse<Record<string, unknown>>(tc.function?.arguments ?? '', {}),
+  }));
+}
+
+/** Build the OpenAI-compatible error message body into a truncatable string. */
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/** Map an HTTP status to a ModelHitchError with a friendly message. */
+export function mapHTTPError(status: number, providerId: string, bodyText: string): ModelHitchError {
+  const detail = bodyText ? ` (${truncate(bodyText, 300)})` : '';
+  switch (status) {
+    case 401:
+      return new ModelHitchError('invalid-api-key', `Provider "${providerId}" rejected the API key.`, {
+        status,
+        providerId,
+      });
+    case 403:
+      return new ModelHitchError('invalid-api-key', `Provider "${providerId}" denied access (403).`, {
+        status,
+        providerId,
+      });
+    case 429:
+      return new ModelHitchError('rate-limited', `Provider "${providerId}" rate limited the request.`, {
+        status,
+        providerId,
+      });
+    case 404:
+      return new ModelHitchError(
+        'model-not-found',
+        `Provider "${providerId}" could not find the model or endpoint.${detail}`,
+        { status, providerId },
+      );
+    case 400:
+      return new ModelHitchError('bad-request', `Provider "${providerId}" rejected the request.${detail}`, {
+        status,
+        providerId,
+      });
+    default:
+      return new ModelHitchError(
+        status >= 500 ? 'provider-error' : 'bad-request',
+        `Provider "${providerId}" returned HTTP ${status}.${detail}`,
+        { status, providerId },
+      );
+  }
+}
+
+/** A Provider backed by any OpenAI-compatible /chat/completions API. */
+export class OpenAICompatibleProvider implements Provider {
+  readonly id: string;
+  readonly name: string;
+  readonly defaultModel: string;
+  readonly capabilities: Capabilities;
+  private readonly config: OpenAICompatibleConfig;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(config: OpenAICompatibleConfig) {
+    this.config = config;
+    this.id = config.id;
+    this.name = config.name;
+    this.defaultModel = config.defaultModel;
+    this.capabilities = {
+      streaming: true,
+      toolCalling: true,
+      vision: true,
+      embeddings: false,
+      ...config.capabilities,
+    };
+    this.fetchImpl = config.fetchImpl ?? ((...args) => fetch(...args));
+  }
+
+  resolveApiKey(credentials: ProviderCredentials): string | undefined {
+    if (credentials.apiKey) return credentials.apiKey;
+    const envVars = [this.config.apiKeyEnvVar, ...(this.config.apiKeyEnvFallbacks ?? [])].filter(
+      (v): v is string => !!v,
+    );
+    for (const name of envVars) {
+      const value = (typeof process !== 'undefined' && process.env?.[name]) as string | undefined;
+      if (value) return value;
+    }
+    if (this.config.requiresKey !== false) {
+      throw new ModelHitchError(
+        'missing-api-key',
+        `Provider "${this.id}" requires an API key. Pass one in the client options or set ${envVars[0] ?? 'the provider env var'}.`,
+        { providerId: this.id },
+      );
+    }
+    return undefined;
+  }
+
+  private buildBody(params: ChatParams, stream: boolean): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+      model: params.model,
+      messages: toOpenAIMessages(params.messages),
+    };
+    const tools = toOpenAITools(params.tools);
+    if (tools) body.tools = tools;
+    if (params.temperature !== undefined) body.temperature = params.temperature;
+    if (params.maxTokens !== undefined) body.max_tokens = params.maxTokens;
+    if (params.stop?.length) body.stop = params.stop;
+    if (stream) {
+      body.stream = true;
+      body.stream_options = { include_usage: true };
+    }
+    return body;
+  }
+
+  private async request(
+    path: string,
+    params: ChatParams,
+    credentials: ProviderCredentials,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    const apiKey = this.resolveApiKey(credentials);
+    const base = (credentials.baseUrl ?? this.config.baseUrl).replace(/\/+$/, '');
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', ...this.config.headers };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    try {
+      return await this.fetchImpl(`${base}${path}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: params.signal,
+      });
+    } catch (err) {
+      if (err instanceof ModelHitchError) throw err;
+      throw new ModelHitchError('network-error', `Request to provider "${this.id}" failed: ${(err as Error)?.message}`, {
+        providerId: this.id,
+        cause: err,
+      });
+    }
+  }
+
+  async chat(params: ChatParams, credentials: ProviderCredentials): Promise<ChatResult> {
+    const res = await this.request('/chat/completions', params, credentials, this.buildBody(params, false));
+    const text = await res.text();
+    if (!res.ok) throw mapHTTPError(res.status, this.id, text);
+    const data = safeJsonParse<OpenAIChatCompletion>(text, {});
+    const choice = data.choices?.[0];
+    const message = choice?.message;
+    if (!message) {
+      throw new ModelHitchError('provider-error', `Provider "${this.id}" returned no message.`, {
+        providerId: this.id,
+      });
+    }
+    const toolCalls = toToolCalls(message.tool_calls);
+    const content = typeof message.content === 'string' ? message.content : '';
+    const result: ModelMessage =
+      toolCalls && toolCalls.length > 0
+        ? { role: 'assistant', content, toolCalls }
+        : { role: 'assistant', content: String(content ?? '') };
+    return {
+      message: result,
+      finishReason: mapFinishReason(choice?.finish_reason),
+      usage: toUsage(data.usage),
+      raw: data,
+    };
+  }
+
+  async *stream(params: ChatParams, credentials: ProviderCredentials): AsyncGenerator<StreamChunk> {
+    const res = await this.request('/chat/completions', params, credentials, this.buildBody(params, true));
+    if (!res.ok) {
+      const text = await res.text();
+      throw mapHTTPError(res.status, this.id, text);
+    }
+    const body = requireBody(res, this.id);
+    const toolAcc = new Map<string, { id: string; name: string; args: string }>();
+
+    for await (const payload of parseSSE(bodyToAsyncIterable(body))) {
+      const chunk = safeJsonParse<OpenAIStreamChunk | null>(payload, null);
+      if (!chunk) continue;
+      const choice = chunk.choices?.[0];
+      if (!choice) continue;
+      const delta = choice.delta ?? {};
+
+      if (typeof delta.content === 'string' && delta.content) {
+        yield { type: 'text-delta', text: delta.content };
+      }
+
+      for (const tc of delta.tool_calls ?? []) {
+        const key = String(tc.index ?? 0);
+        const name = tc.function?.name;
+        if (name) {
+          const id = tc.id ?? `call_${key}`;
+          toolAcc.set(key, { id, name, args: '' });
+          yield { type: 'tool-call-start', id, name };
+        }
+        const argsDelta = tc.function?.arguments;
+        if (argsDelta) {
+          const acc = toolAcc.get(key);
+          if (acc) {
+            acc.args += argsDelta;
+            yield { type: 'tool-call-args-delta', id: acc.id, argsDelta };
+          }
+        }
+      }
+
+      if (choice.finish_reason) {
+        if (choice.finish_reason === 'tool_calls') {
+          for (const acc of toolAcc.values()) yield { type: 'tool-call-end', id: acc.id };
+        }
+        const usage = toUsage(chunk.usage);
+        yield usage
+          ? { type: 'finish', finishReason: mapFinishReason(choice.finish_reason), usage }
+          : { type: 'finish', finishReason: mapFinishReason(choice.finish_reason) };
+      }
+    }
+  }
+
+  async listModels(credentials: ProviderCredentials): Promise<ModelInfo[]> {
+    const apiKey = this.resolveApiKey(credentials);
+    const base = (credentials.baseUrl ?? this.config.baseUrl).replace(/\/+$/, '');
+    const headers: Record<string, string> = { ...this.config.headers };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${base}/models`, { headers });
+    } catch (err) {
+      throw new ModelHitchError('network-error', `Failed to list models from "${this.id}": ${(err as Error)?.message}`, {
+        providerId: this.id,
+        cause: err,
+      });
+    }
+    const text = await res.text();
+    if (!res.ok) throw mapHTTPError(res.status, this.id, text);
+    const data = safeJsonParse<{ data?: Array<{ id: string; name?: string; context_length?: number }> }>(text, {});
+    return (data.data ?? []).map((m) => ({
+      id: m.id,
+      name: m.name,
+      contextLength: m.context_length,
+    }));
+  }
+}
+
+export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig): Provider {
+  return new OpenAICompatibleProvider(config);
+}
