@@ -24,7 +24,15 @@ import {
   toGeminiStreamEvents,
   type GeminiRequest,
 } from './gemini-wire.js';
-import { mapResponsesRequest, toResponsesCompletion, toResponsesStreamEvents, type ResponsesRequest } from './responses.js';
+import {
+  assistantMessagesFromResult,
+  mapResponsesRequest,
+  resolveConversation,
+  toResponsesCompletion,
+  toResponsesStreamEvents,
+  type ResponsesRequest,
+} from './responses.js';
+import { clearConversations, rememberConversation } from './conversation-state.js';
 import { normalizeBodyImages } from './local-images.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 
@@ -135,6 +143,7 @@ export class OpenAICompatibleServer {
 
   /** Stop the server. */
   close(): Promise<void> {
+    clearConversations();
     return new Promise((resolve, reject) => {
       if (!this.httpServer) return resolve();
       this.httpServer.close((err) => (err ? reject(err) : resolve()));
@@ -399,6 +408,13 @@ export class OpenAICompatibleServer {
     const params = mapResponsesRequest(body, model);
     if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
 
+    // Stateful continuation: the client sliced prior turns out and references
+    // them via previous_response_id. The bridge holds the state (zen rejects
+    // the field outright) — expand the delta against the cache and forward
+    // the FULL conversation stateless.
+    params.messages = resolveConversation(params, body.previous_response_id);
+    params.previousResponseId = undefined;
+
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (responses stream)`);
       await this.writeResponsesStream(res, provider, params, credentials, model);
@@ -409,7 +425,10 @@ export class OpenAICompatibleServer {
     const startedAt = Date.now();
     const result = await provider.chat(params, credentials);
     this.reportUsage({ providerId: provider.id, model, wire: 'responses', streamed: false }, result.usage, startedAt);
-    this.sendJson(res, 200, toResponsesCompletion(result, model));
+    const completion = toResponsesCompletion(result, model);
+    this.sendJson(res, 200, completion);
+    // Remember this turn so a follow-up previous_response_id can be resolved.
+    rememberConversation(String(completion.id), [...params.messages, ...assistantMessagesFromResult(result.message)]);
   }
 
   /** Stream a normalized provider stream out as Responses API SSE events. */
@@ -439,7 +458,11 @@ export class OpenAICompatibleServer {
         { providerId: provider.id, model, wire: 'responses', streamed: true },
         Date.now(),
       );
-      for await (const line of toResponsesStreamEvents(stream, model)) {
+      for await (const line of toResponsesStreamEvents(stream, model, {
+        onCompleted: (responseId, assistantMessages) => {
+          rememberConversation(responseId, [...params.messages, ...assistantMessages]);
+        },
+      })) {
         res.write(line);
       }
       res.end();

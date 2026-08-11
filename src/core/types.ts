@@ -59,6 +59,14 @@ export interface ChatParams {
   toolChoice?: ToolChoice;
   /** Structured output request (JSON mode / JSON Schema). */
   responseFormat?: ResponseFormat;
+  /**
+   * Responses-API continuation: the id of the previous response, when the
+   * client keeps conversation state server-side (previous_response_id).
+   * Providers that expose a stateful Responses endpoint forward it; the
+   * stateless bridge conversion relies on it to keep orphaned
+   * function_call_output deltas (see responses.ts).
+   */
+  previousResponseId?: string;
   signal?: AbortSignal;
 }
 
@@ -84,7 +92,7 @@ export type StreamChunk =
   | { type: 'tool-call-start'; id: string; name: string; thoughtSignature?: string }
   | { type: 'tool-call-args-delta'; id: string; argsDelta: string }
   | { type: 'tool-call-end'; id: string }
-  | { type: 'finish'; finishReason: string; usage?: Usage };
+  | { type: 'finish'; finishReason: string; usage?: Usage; responseId?: string };
 
 /** What a provider can do. Used for capability detection and filtering. */
 export interface Capabilities {

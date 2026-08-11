@@ -1,5 +1,16 @@
-import { describe, expect, it } from 'vitest';
-import { responsesInputToMessages } from '../src/server/responses.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  assistantMessagesFromResult,
+  mapResponsesRequest,
+  resolveConversation,
+  responsesInputToMessages,
+  toResponsesCompletion,
+} from '../src/server/responses.js';
+import {
+  clearConversations,
+  conversationCount,
+  rememberConversation,
+} from '../src/server/conversation-state.js';
 
 /**
  * Unit tests for `responsesInputToMessages` — the Responses `input` item ->
@@ -194,5 +205,172 @@ describe('responsesInputToMessages — function_call_output', () => {
     const assistant = messages.find((m) => m.role === 'assistant');
     expect(assistant!.toolCalls).toHaveLength(2);
     expect(messages.filter((m) => m.role === 'tool')).toHaveLength(2);
+  });
+
+  it('KEEPS an orphaned function_call_output when keepOrphanedOutputs is set (stateful delta turn)', () => {
+    // Stateful continuation: the conversation lives on the upstream provider
+    // (previous_response_id), so the delta's function_call_output whose
+    // function_call was in an EARLIER request must be kept — its call_id is
+    // matched against upstream state, not this request.
+    const messages = responsesInputToMessages(
+      [
+        { type: 'function_call_output', call_id: 'call_from_previous_turn', output: '42' },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue' }] },
+      ],
+      { keepOrphanedOutputs: true },
+    );
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({ role: 'tool', content: '42', toolCallId: 'call_from_previous_turn' });
+    expect(messages[1]).toMatchObject({ role: 'user', content: 'continue' });
+  });
+
+  it('still drops a call_id-less function_call_output even when keepOrphanedOutputs is set', () => {
+    const messages = responsesInputToMessages(
+      [{ type: 'function_call_output', output: 'no-call-id' }],
+      { keepOrphanedOutputs: true },
+    );
+    expect(messages).toHaveLength(0);
+  });
+});
+
+describe('mapResponsesRequest — stateful continuation (previous_response_id)', () => {
+  it('forwards previous_response_id and keeps orphaned outputs in the delta', () => {
+    const params = mapResponsesRequest(
+      {
+        model: 'mock-model',
+        previous_response_id: 'resp_zen_abc123',
+        input: [
+          // Delta of a tool-result turn: the function_call lived in the
+          // previous response, only the output is new.
+          { type: 'function_call_output', call_id: 'call_t1', output: '{"temp": 21}' },
+        ],
+      },
+      'mock-model',
+    );
+    expect(params.previousResponseId).toBe('resp_zen_abc123');
+    expect(params.messages).toEqual([
+      { role: 'tool', content: '{"temp": 21}', toolCallId: 'call_t1' },
+    ]);
+  });
+
+  it('ignores empty/absent previous_response_id (stateless path unchanged)', () => {
+    const params = mapResponsesRequest({ model: 'mock-model', input: [] }, 'mock-model');
+    expect(params.previousResponseId).toBeUndefined();
+  });
+});
+
+describe('toResponsesCompletion — upstream response id round-trip', () => {
+  it('echoes the provider raw resp_ id instead of synthesizing a new one', () => {
+    const body = toResponsesCompletion(
+      {
+        message: { role: 'assistant', content: 'hi' },
+        finishReason: 'stop',
+        usage: { inputTokens: 3, outputTokens: 2 },
+        raw: { id: 'resp_zen_real_id', status: 'completed' },
+      },
+      'mock-model',
+    );
+    expect(body.id).toBe('resp_zen_real_id');
+    expect(body.status).toBe('completed');
+    expect(body.model).toBe('mock-model');
+  });
+
+  it('falls back to a synthetic resp_ id when raw has none (other providers)', () => {
+    const body = toResponsesCompletion(
+      { message: { role: 'assistant', content: 'hi' }, finishReason: 'stop' },
+      'mock-model',
+    );
+    expect(body.id).toMatch(/^resp_/);
+    expect(body.id).not.toBe('resp_zen_real_id');
+  });
+
+  it('ignores non-resp_ raw ids (chat-completion ids would poison the chain)', () => {
+    const body = toResponsesCompletion(
+      {
+        message: { role: 'assistant', content: 'hi' },
+        finishReason: 'stop',
+        raw: { id: 'chatcmpl-xyz' },
+      },
+      'mock-model',
+    );
+    expect(body.id).toMatch(/^resp_[0-9a-f-]{36}$/);
+  });
+
+  it('accepts zen native gen- ids so they round-trip', () => {
+    const body = toResponsesCompletion(
+      {
+        message: { role: 'assistant', content: 'hi' },
+        finishReason: 'stop',
+        raw: { id: 'gen-1786487861-uBH8hIzt1AwyF7XMCa9t', status: 'completed' },
+      },
+      'mock-model',
+    );
+    expect(body.id).toBe('gen-1786487861-uBH8hIzt1AwyF7XMCa9t');
+  });
+});
+
+describe('resolveConversation — bridge-side conversation reconstruction', () => {
+  beforeEach(() => clearConversations());
+  afterEach(() => clearConversations());
+
+  it('returns messages unchanged when there is no previous_response_id', () => {
+    const params = mapResponsesRequest(
+      { model: 'mock-model', input: [{ role: 'user', content: 'hi' }] },
+      'mock-model',
+    );
+    expect(resolveConversation(params, undefined)).toBe(params.messages);
+  });
+
+  it('expands a delta against the cached conversation', () => {
+    rememberConversation('resp_1', [
+      { role: 'user', content: '!tool get_weather' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'call_1', name: 'get_weather', arguments: {} }] },
+    ]);
+    const params = mapResponsesRequest(
+      {
+        model: 'mock-model',
+        previous_response_id: 'resp_1',
+        input: [{ type: 'function_call_output', call_id: 'call_1', output: '42' }],
+      },
+      'mock-model',
+    );
+    const messages = resolveConversation(params, 'resp_1');
+    expect(messages).toEqual([
+      { role: 'user', content: '!tool get_weather' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'call_1', name: 'get_weather', arguments: {} }] },
+      { role: 'tool', content: '42', toolCallId: 'call_1' },
+    ]);
+  });
+
+  it('throws a clear bad-request when the referenced conversation is gone', () => {
+    const params = mapResponsesRequest(
+      {
+        model: 'mock-model',
+        previous_response_id: 'resp_lost',
+        input: [{ type: 'function_call_output', call_id: 'call_1', output: '42' }],
+      },
+      'mock-model',
+    );
+    expect(() => resolveConversation(params, 'resp_lost')).toThrow(/Start a new chat/);
+  });
+});
+
+describe('assistantMessagesFromResult', () => {
+  it('extracts an assistant message with content and tool calls', () => {
+    expect(
+      assistantMessagesFromResult({ role: 'assistant', content: 'done', toolCalls: [{ id: 'c', name: 't', arguments: {} }] }),
+    ).toEqual([{ role: 'assistant', content: 'done', toolCalls: [{ id: 'c', name: 't', arguments: {} }] }]);
+  });
+
+  it('returns [] for empty or non-assistant messages', () => {
+    expect(assistantMessagesFromResult({ role: 'user', content: 'hi' })).toEqual([]);
+    expect(assistantMessagesFromResult({ role: 'assistant', content: '' })).toEqual([]);
+  });
+
+  it('tracks the cache size (eviction hook)', () => {
+    clearConversations();
+    rememberConversation('resp_1', []);
+    rememberConversation('resp_2', []);
+    expect(conversationCount()).toBe(2);
   });
 });

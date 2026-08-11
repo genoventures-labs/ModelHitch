@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { safeJsonParse } from '../core/json.js';
 import { serializeText } from '../core/content.js';
+import { ModelHitchError } from '../core/errors.js';
+import { conversationFor } from './conversation-state.js';
 import type {
   ChatParams,
   ContentPart,
@@ -57,6 +59,12 @@ export interface ResponsesRequest {
   temperature?: number;
   max_output_tokens?: number;
   stop?: string | string[];
+  /**
+   * Stateful continuation: the id of the previous response. Kept conversation
+   * state server-side; input is the *delta* since that response. Forwarded to
+   * providers with a stateful Responses endpoint (zen-responses).
+   */
+  previous_response_id?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,8 +136,17 @@ function itemContent(item: Record<string, unknown>): string | ContentPart[] {
  * top-level `function_call` items are merged into a single assistant message
  * (they belong to one assistant turn); each `function_call_output` becomes the
  * matching `tool` message.
+ *
+ * `opts.keepOrphanedOutputs` (stateful continuations): when the request
+ * carries `previous_response_id`, the conversation lives on the upstream
+ * provider, so `function_call_output` items whose `function_call` was in an
+ * *earlier* request must be kept — their call_ids are matched by the
+ * provider's own state.
  */
-export function responsesInputToMessages(input: unknown[] | undefined): ModelMessage[] {
+export function responsesInputToMessages(
+  input: unknown[] | undefined,
+  opts?: { keepOrphanedOutputs?: boolean },
+): ModelMessage[] {
   const out: ModelMessage[] = [];
   let pending: { role: 'assistant'; content: string; toolCalls: ToolCall[] } | null = null;
   const flush = () => {
@@ -162,14 +179,14 @@ export function responsesInputToMessages(input: unknown[] | undefined): ModelMes
     flush();
     if (item.type === 'function_call_output') {
       const callId = String(item.call_id ?? '');
-      // Stateful Responses requests (VS Code Copilot extension) slice prior
-      // turns and reference them via previous_response_id — which the bridge
-      // drops. A function_call_output whose function_call lives in an earlier
-      // request (or that has no call_id at all) would otherwise be forwarded
-      // as an orphaned tool message and rejected upstream with an opaque 400.
-      // Drop it: the bridge conversion is stateless, so that context was
-      // never forwarded anyway.
-      if (!callId || !callIds.has(callId)) continue;
+      // Stateless conversion (no previous_response_id): a function_call_output
+      // whose function_call lives in an earlier request (or that has no
+      // call_id at all) would be forwarded as an orphaned tool message and
+      // rejected upstream with an opaque 400 — drop it, since that context
+      // was never forwarded anyway. Stateful continuations (VS Code Copilot
+      // extension delta turns) keep them: the upstream provider matches the
+      // call_ids against its own conversation state.
+      if (!callId || (!opts?.keepOrphanedOutputs && !callIds.has(callId))) continue;
       const output = item.output;
       let content: string;
       if (typeof output === 'string') content = output;
@@ -241,7 +258,13 @@ function mapResponsesTextFormat(format: unknown): ResponseFormat | undefined {
 
 /** Convert a Responses API request into normalized ChatParams. */
 export function mapResponsesRequest(body: ResponsesRequest, model: string): ChatParams {
-  const messages = responsesInputToMessages(body.input);
+  // Stateful continuation: forward the upstream response id so the provider
+  // can resolve the delta input against its own conversation state.
+  const previousResponseId =
+    typeof body.previous_response_id === 'string' && body.previous_response_id.length > 0
+      ? body.previous_response_id
+      : undefined;
+  const messages = responsesInputToMessages(body.input, { keepOrphanedOutputs: !!previousResponseId });
   if (typeof body.instructions === 'string' && body.instructions) {
     messages.unshift({ role: 'system', content: body.instructions });
   } else if (Array.isArray(body.instructions)) {
@@ -250,6 +273,7 @@ export function mapResponsesRequest(body: ResponsesRequest, model: string): Chat
   }
 
   const params: ChatParams = { model, messages };
+  if (previousResponseId) params.previousResponseId = previousResponseId;
   if (Array.isArray(body.tools)) {
     const tools: ToolDefinition[] = [];
     for (const t of body.tools) {
@@ -267,6 +291,43 @@ export function mapResponsesRequest(body: ResponsesRequest, model: string): Chat
   return params;
 }
 
+/**
+ * Resolve a stateful continuation against the bridge's conversation cache.
+ *
+ * The client (VS Code Copilot extension) slices prior turns out of the
+ * request and references them via `previous_response_id`. zen rejects that
+ * field outright, so the bridge reconstructs the FULL conversation (cached
+ * messages + this request's delta) and forwards it stateless.
+ *
+ * Returns the expanded messages to forward. Throws a clear error when the
+ * referenced conversation is no longer cached (bridge restarted) — the delta
+ * alone is unanswerable, and forwarding it would surface an opaque 400.
+ */
+export function resolveConversation(params: ChatParams, previousResponseId: string | undefined): ModelMessage[] {
+  if (!previousResponseId) return params.messages;
+  const prior = conversationFor(previousResponseId);
+  if (!prior) {
+    throw new ModelHitchError(
+      'bad-request',
+      `Conversation state for previous_response_id "${previousResponseId}" was lost (bridge restarted). Start a new chat.`,
+      { status: 400 },
+    );
+  }
+  return [...prior, ...params.messages];
+}
+
+/**
+ * Extract the normalized assistant message(s) from a provider result — the
+ * part of a turn the bridge must remember for stateful continuations.
+ */
+export function assistantMessagesFromResult(message: ModelMessage): ModelMessage[] {
+  if (message.role !== 'assistant') return [];
+  const content = serializeText(message.content);
+  const toolCalls = message.toolCalls ?? [];
+  if (!content && toolCalls.length === 0) return [];
+  return [{ role: 'assistant', content, toolCalls }];
+}
+
 // ---------------------------------------------------------------------------
 // Outbound: normalized result -> Responses API body / SSE events
 // ---------------------------------------------------------------------------
@@ -279,9 +340,25 @@ function toResponsesUsage(usage?: Usage): { input_tokens: number; output_tokens:
   };
 }
 
+/**
+ * Best-effort extraction of the upstream Responses API id from a provider's
+ * raw result. Accepts `resp_` ids (OpenAI/zen spec) and zen's native `gen-`
+ * ids; anything else (chat-completion ids, mock echoes, …) is ignored — an
+ * unknown id would poison the stateful previous_response_id chain.
+ */
+function upstreamResponseId(raw: unknown): string | undefined {
+  if (raw && typeof raw === 'object') {
+    const id = (raw as Record<string, unknown>).id;
+    if (typeof id === 'string' && /^(resp_|gen_|gen-)/.test(id)) return id;
+  }
+  return undefined;
+}
+
 /** Convert a normalized ChatResult into a non-streamed Responses body. */
 export function toResponsesCompletion(result: ChatResult, model: string): Record<string, unknown> {
-  const id = `resp_${randomUUID()}`;
+  // Round-trip the provider's real response id so the client's follow-up
+  // previous_response_id resolves against this bridge's conversation cache.
+  const id = upstreamResponseId(result.raw) ?? `resp_${randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
   const output: Record<string, unknown>[] = [];
   const content = serializeText(result.message.content);
@@ -321,12 +398,21 @@ export function toResponsesCompletion(result: ChatResult, model: string): Record
  * Convert a normalized provider event stream into Responses API SSE lines
  * (`data: {...}\n\n`). Mirrors the event vocabulary emitted by the Zen
  * /responses endpoint so Codex parses it natively.
+ *
+ * `opts.onCompleted` fires once the final response id is known (after
+ * response.completed), with the assistant messages of this turn — the caller
+ * stores them in the conversation cache for stateful continuations.
  */
 export async function* toResponsesStreamEvents(
   events: AsyncIterable<StreamChunk>,
   model: string,
+  opts?: { onCompleted?: (responseId: string, assistantMessages: ModelMessage[]) => void },
 ): AsyncGenerator<string> {
   const id = `resp_${randomUUID()}`;
+  // When the provider reports its own response id (stateful Responses
+  // endpoint), the final response.completed carries it so the client's next
+  // previous_response_id round-trips to this bridge's conversation cache.
+  let upstreamId: string | undefined;
   const created = Math.floor(Date.now() / 1000);
   const data = (obj: unknown) => `data: ${JSON.stringify(obj)}\n\n`;
 
@@ -336,6 +422,7 @@ export async function* toResponsesStreamEvents(
   });
 
   const output: Array<Record<string, unknown>> = [];
+  const assistantMessages: ModelMessage[] = [];
   let textItem: Record<string, unknown> | null = null;
   let textPart: Record<string, unknown> | null = null;
   let toolItem: Record<string, unknown> | null = null;
@@ -356,6 +443,7 @@ export async function* toResponsesStreamEvents(
     });
     textItem.status = 'completed';
     yield data({ type: 'response.output_item.done', output_index: i, item: textItem });
+    assistantMessages.push({ role: 'assistant', content: (textPart?.text as string) ?? '' });
     textItem = null;
     textPart = null;
   };
@@ -365,6 +453,17 @@ export async function* toResponsesStreamEvents(
     toolItem.arguments = toolArgs;
     toolItem.status = 'completed';
     yield data({ type: 'response.output_item.done', output_index: indexOf(toolItem), item: toolItem });
+    assistantMessages.push({
+      role: 'assistant',
+      content: '',
+      toolCalls: [
+        {
+          id: toolItem.call_id as string,
+          name: toolItem.name as string,
+          arguments: safeJsonParse<Record<string, unknown>>(toolArgs, {}),
+        },
+      ],
+    });
     toolItem = null;
   };
 
@@ -434,6 +533,7 @@ export async function* toResponsesStreamEvents(
           break;
         case 'finish': {
           if (event.usage) usage = event.usage;
+          if (event.responseId) upstreamId = event.responseId;
           yield* completeTextItem();
           yield* completeToolItem();
           break;
@@ -462,7 +562,7 @@ export async function* toResponsesStreamEvents(
   yield data({
     type: 'response.completed',
     response: {
-      id,
+      id: upstreamId ?? id,
       object: 'response',
       created_at: created,
       status: 'completed',
@@ -471,4 +571,8 @@ export async function* toResponsesStreamEvents(
       usage: toResponsesUsage(usage),
     },
   });
+
+  // The response id is final now — let the caller remember this turn for
+  // stateful continuations (streaming path; non-stream uses the ChatResult).
+  opts?.onCompleted?.(upstreamId ?? id, assistantMessages);
 }

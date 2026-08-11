@@ -255,6 +255,10 @@ export class ZenResponsesProvider implements Provider {
     if (params.temperature !== undefined) body.temperature = params.temperature;
     if (params.maxTokens !== undefined) body.max_output_tokens = params.maxTokens;
     if (params.stop?.length) body.stop = params.stop;
+    // Stateful continuation: the client references a previous response whose
+    // id this provider issued — forward it so zen resolves the delta input
+    // (including orphaned function_call_output items) against its own state.
+    if (params.previousResponseId) body.previous_response_id = params.previousResponseId;
     if (stream) body.stream = true;
     return body;
   }
@@ -377,6 +381,10 @@ export class ZenResponsesProvider implements Provider {
             type: 'finish',
             finishReason: finishReasonFor(resp?.output, resp?.status),
             ...(toUsage(resp?.usage) ? { usage: toUsage(resp?.usage) } : {}),
+            // Round-trip zen's real response id (resp_... or gen-...) so the
+            // client's next previous_response_id resolves against this same
+            // conversation.
+            ...(typeof resp?.id === 'string' && /^(resp_|gen_|gen-)/.test(resp.id) ? { responseId: resp.id } : {}),
           };
           break;
         }
@@ -386,6 +394,7 @@ export class ZenResponsesProvider implements Provider {
             type: 'finish',
             finishReason: 'length',
             ...(toUsage(resp?.usage) ? { usage: toUsage(resp?.usage) } : {}),
+            ...(typeof resp?.id === 'string' && /^(resp_|gen_|gen-)/.test(resp.id) ? { responseId: resp.id } : {}),
           };
           break;
         }

@@ -139,6 +139,31 @@ describe('ZenResponsesProvider', () => {
     expect(toolCalls).toEqual([{ id: 'call_1', name: 'get_weather', arguments: { city: 'SF' } }]);
   });
 
+  it('forwards previous_response_id for stateful continuations', async () => {
+    const { fetchImpl, calls } = mockFetch({
+      responseBody: {
+        id: 'resp_3',
+        status: 'completed',
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '42 it is.' }] }],
+      },
+    });
+    const zen = createZenResponsesProvider({ fetchImpl });
+    await zen.chat(
+      {
+        model: 'gpt-5.6-luna',
+        messages: [{ role: 'tool', toolCallId: 'call_t1', content: '42' }],
+        previousResponseId: 'resp_2',
+      },
+      CREDENTIALS,
+    );
+    expect(calls[0]!.body.previous_response_id).toBe('resp_2');
+    // The delta input is forwarded as-is (zen resolves call ids against its
+    // own state for the referenced response).
+    expect(calls[0]!.body.input).toEqual([
+      { type: 'function_call_output', call_id: 'call_t1', output: '42' },
+    ]);
+  });
+
   it('normalizes Responses SSE events into StreamChunks', async () => {
     const { fetchImpl } = mockFetch({
       stream: true,
@@ -172,6 +197,7 @@ describe('ZenResponsesProvider', () => {
         type: 'finish',
         finishReason: 'tool-calls',
         usage: { inputTokens: 8, outputTokens: 6, totalTokens: 14 },
+        responseId: 'resp_1',
       },
     ]);
   });
