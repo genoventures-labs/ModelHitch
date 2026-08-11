@@ -46,7 +46,7 @@ export interface ModelHitchServerOptions {
    * discovery where the provider supports it.
    */
   staticModels?: Record<string, string[]>;
-  /** Request body size cap in bytes. Default 10 MiB. */
+  /** Request body size cap in bytes. Default 64 MiB (room for inline base64 images). */
   maxBodyBytes?: number;
   /** Called once per request with a one-line summary. */
   logger?: (line: string) => void;
@@ -80,7 +80,7 @@ export interface UsageEvent {
   at: string;
 }
 
-const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
+const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024; // images arrive as inline base64 — 10 MiB was too small
 
 /**
  * A local, OpenAI-compatible HTTP server in front of the ModelHitch harness.
@@ -693,8 +693,12 @@ export class OpenAICompatibleServer {
       req.on('data', (chunk: Buffer) => {
         size += chunk.length;
         if (size > max) {
+          // Don't destroy the socket — the error response wouldn't flush.
+          // Pause reading and let the dispatch error handler write the 413;
+          // Node closes the connection after the response since the body
+          // wasn't consumed.
+          req.pause();
           reject(new ModelHitchError('bad-request', 'Request body too large.', { status: 413 }));
-          req.destroy();
           return;
         }
         chunks.push(chunk);

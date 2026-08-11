@@ -177,11 +177,22 @@ describe('ZenResponsesProvider', () => {
   });
 
   it('throws missing-api-key without credentials', async () => {
-    const { fetchImpl } = mockFetch({});
-    const zen = createZenResponsesProvider({ fetchImpl });
-    await expect(
-      zen.chat({ model: 'gpt-5.5', messages: [{ role: 'user', content: 'hi' }] }, {}),
-    ).rejects.toMatchObject({ code: 'missing-api-key' });
+    const savedZen = process.env.OPENCODE_ZEN_API_KEY;
+    const savedGo = process.env.OPENCODE_API_KEY;
+    delete process.env.OPENCODE_ZEN_API_KEY;
+    delete process.env.OPENCODE_API_KEY;
+    try {
+      const { fetchImpl } = mockFetch({});
+      const zen = createZenResponsesProvider({ fetchImpl });
+      await expect(
+        zen.chat({ model: 'gpt-5.5', messages: [{ role: 'user', content: 'hi' }] }, {}),
+      ).rejects.toMatchObject({ code: 'missing-api-key' });
+    } finally {
+      if (savedZen !== undefined) process.env.OPENCODE_ZEN_API_KEY = savedZen;
+      else delete process.env.OPENCODE_ZEN_API_KEY;
+      if (savedGo !== undefined) process.env.OPENCODE_API_KEY = savedGo;
+      else delete process.env.OPENCODE_API_KEY;
+    }
   });
 
   it('maps 404 to model-not-found', async () => {

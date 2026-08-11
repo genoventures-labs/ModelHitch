@@ -153,11 +153,22 @@ describe('OpenCode Zen provider', () => {
   });
 
   it('throws missing-api-key without credentials', async () => {
-    const { fetchImpl } = mockFetch({});
-    const zen = createOpenCodeZenProvider({ fetchImpl });
-    await expect(
-      zen.chat({ model: 'big-pickle', messages: [{ role: 'user', content: 'hi' }] }, {}),
-    ).rejects.toMatchObject({ code: 'missing-api-key' });
+    const savedZen = process.env.OPENCODE_ZEN_API_KEY;
+    const savedGo = process.env.OPENCODE_API_KEY;
+    delete process.env.OPENCODE_ZEN_API_KEY;
+    delete process.env.OPENCODE_API_KEY;
+    try {
+      const { fetchImpl } = mockFetch({});
+      const zen = createOpenCodeZenProvider({ fetchImpl });
+      await expect(
+        zen.chat({ model: 'big-pickle', messages: [{ role: 'user', content: 'hi' }] }, {}),
+      ).rejects.toMatchObject({ code: 'missing-api-key' });
+    } finally {
+      if (savedZen !== undefined) process.env.OPENCODE_ZEN_API_KEY = savedZen;
+      else delete process.env.OPENCODE_ZEN_API_KEY;
+      if (savedGo !== undefined) process.env.OPENCODE_API_KEY = savedGo;
+      else delete process.env.OPENCODE_API_KEY;
+    }
   });
 
   it('curates non-empty Zen model list with the free models present', () => {

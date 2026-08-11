@@ -369,6 +369,10 @@ const server = createModelHitchServer({
 const { url } = await server.listen(3939, '127.0.0.1');
 ```
 
+Request bodies are capped at **64 MiB** by default (room for inline base64 images — Codex
+attaches them as `image_url` data URIs). Tune via the `maxBodyBytes` option, or
+`MODELHITCH_MAX_BODY_BYTES` when running `npm run bridge`.
+
 Endpoints: `POST /v1/chat/completions` (stream + non-stream), `POST /v1/responses` (stream +
 non-stream — Codex CLI / Responses-API clients), `POST /v1/messages` (stream + non-stream —
 Claude Code / Anthropic-format gateways, plus `POST /v1/messages/count_tokens`), `GET

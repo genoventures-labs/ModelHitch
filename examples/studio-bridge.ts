@@ -18,6 +18,7 @@ import { createModelHitchServer, OPENCODE_GO_MODELS, OPENCODE_ZEN_MODELS } from 
 
 const PORT = Number(process.env.MODELHITCH_PORT ?? 3939);
 const HOST = '127.0.0.1';
+const MAX_BODY_BYTES = Number(process.env.MODELHITCH_MAX_BODY_BYTES ?? 64 * 1024 * 1024);
 
 async function main() {
   const server = createModelHitchServer({
@@ -26,6 +27,7 @@ async function main() {
       'opencode-zen': [...OPENCODE_ZEN_MODELS],
       'opencode-go': [...OPENCODE_GO_MODELS],
     },
+    maxBodyBytes: MAX_BODY_BYTES,
     logger: (line) => console.log(line),
   });
 

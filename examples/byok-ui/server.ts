@@ -14,6 +14,7 @@ import { createModelHitchServer, mockProvider } from '../../src/index.js';
 const server = createModelHitchServer({
   providers: [mockProvider],
   defaultProviderId: 'mock',
+  maxBodyBytes: Number(process.env.MODELHITCH_MAX_BODY_BYTES ?? 64 * 1024 * 1024),
   logger: (line) => console.log(line),
 });
 
