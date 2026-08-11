@@ -55,6 +55,8 @@ function inspect(params: ChatParams): { text: string; toolName: string | null } 
   const last = [...params.messages].reverse().find((m) => m.role === 'user');
   const raw = typeof last?.content === 'string' ? last.content : '';
   const match = raw.match(/^!tool\s+(\S+)/);
+  // toolChoice 'none' suppresses tool simulation.
+  if (params.toolChoice === 'none') return { text: raw, toolName: null };
   if (match?.[1]) return { text: raw, toolName: match[1] };
   return { text: raw, toolName: null };
 }

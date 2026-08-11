@@ -19,6 +19,8 @@ export interface OpenAIToolCallInput {
   id?: string;
   type?: string;
   function?: { name?: string; arguments?: string };
+  /** Provider-specific token echoed back on the next turn (e.g. Gemini thoughtSignature). */
+  thoughtSignature?: string;
 }
 
 /** An inbound message. `role` is one of system | user | assistant | tool. */
@@ -47,6 +49,10 @@ export interface OpenAIChatRequest {
   stop?: string[];
   stream?: boolean;
   stream_options?: { include_usage?: boolean };
+  /** Passed through to the provider (auto | none | required | {type,function}). */
+  tool_choice?: unknown;
+  /** Passed through to the provider (text | json_object | json_schema). */
+  response_format?: unknown;
 }
 
 /** A tool call in an outbound assistant message. */
@@ -54,6 +60,8 @@ export interface OpenAIToolCallOutput {
   id: string;
   type: 'function';
   function: { name: string; arguments: string };
+  /** Provider-specific token echoed back on the next turn (e.g. Gemini thoughtSignature). */
+  thoughtSignature?: string;
 }
 
 /** Outbound non-streaming `chat.completion` object. */

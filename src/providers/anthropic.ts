@@ -42,10 +42,28 @@ interface AnthropicStreamEvent {
 
 const DEFAULT_MAX_TOKENS = 4096; // Anthropic requires max_tokens.
 
+/** Map a normalized ToolChoice to the Anthropic tool_choice format. */
+function toAnthropicToolChoice(choice: ChatParams['toolChoice']): Record<string, unknown> {
+  if (choice === 'none') return { type: 'none' };
+  if (choice === 'required') return { type: 'any' };
+  if (typeof choice === 'object') return { type: 'tool', name: choice.name };
+  return { type: 'auto' };
+}
+
 export interface AnthropicProviderOptions {
+  /** Provider id (default "anthropic"). */
+  id?: string;
+  /** Display name (default "Anthropic"). */
+  name?: string;
+  /** Base URL including the version segment, e.g. "https://api.anthropic.com/v1". */
   baseUrl?: string;
   defaultModel?: string;
   apiKeyEnvVar?: string;
+  /** Additional env vars checked when the primary one is unset. */
+  apiKeyEnvFallbacks?: string[];
+  /** Messages endpoint path (default "/messages"). */
+  messagesPath?: string;
+  capabilities?: Partial<Capabilities>;
   fetchImpl?: typeof fetch;
 }
 
@@ -56,31 +74,41 @@ export interface AnthropicProviderOptions {
  * browser context prefer image-data parts).
  */
 export class AnthropicProvider implements Provider {
-  readonly id = 'anthropic';
-  readonly name = 'Anthropic';
+  readonly id: string;
+  readonly name: string;
   readonly defaultModel: string;
-  readonly capabilities: Capabilities = {
-    streaming: true,
-    toolCalling: true,
-    vision: true,
-    embeddings: false,
-    maxContextTokens: 200_000,
-  };
+  readonly capabilities: Capabilities;
   private readonly baseUrl: string;
+  private readonly messagesPath: string;
   private readonly apiKeyEnvVar: string;
+  private readonly apiKeyEnvFallbacks: string[];
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: AnthropicProviderOptions = {}) {
+    this.id = opts.id ?? 'anthropic';
+    this.name = opts.name ?? 'Anthropic';
     this.defaultModel = opts.defaultModel ?? 'claude-sonnet-4-5';
     this.baseUrl = (opts.baseUrl ?? 'https://api.anthropic.com/v1').replace(/\/+$/, '');
+    this.messagesPath = opts.messagesPath ?? '/messages';
     this.apiKeyEnvVar = opts.apiKeyEnvVar ?? 'ANTHROPIC_API_KEY';
+    this.apiKeyEnvFallbacks = opts.apiKeyEnvFallbacks ?? [];
+    this.capabilities = {
+      streaming: true,
+      toolCalling: true,
+      vision: true,
+      embeddings: false,
+      maxContextTokens: 200_000,
+      ...opts.capabilities,
+    };
     this.fetchImpl = opts.fetchImpl ?? ((...args) => fetch(...args));
   }
 
   resolveApiKey(credentials: ProviderCredentials): string {
     if (credentials.apiKey) return credentials.apiKey;
-    const env = (typeof process !== 'undefined' && process.env?.[this.apiKeyEnvVar]) as string | undefined;
-    if (env) return env;
+    for (const name of [this.apiKeyEnvVar, ...this.apiKeyEnvFallbacks]) {
+      const env = (typeof process !== 'undefined' && process.env?.[name]) as string | undefined;
+      if (env) return env;
+    }
     throw new ModelHitchError(
       'missing-api-key',
       `Provider "${this.id}" requires an API key. Pass one in the client options or set ${this.apiKeyEnvVar}.`,
@@ -182,13 +210,23 @@ export class AnthropicProvider implements Provider {
       max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
       messages,
     };
-    if (system) body.system = system;
+    let systemText = system;
+    // Anthropic has no response_format param — JSON mode is achieved via instruction.
+    if (params.responseFormat && params.responseFormat !== 'text') {
+      systemText = systemText
+        ? `${systemText}\n\nRespond with valid JSON only, no prose.`
+        : 'Respond with valid JSON only, no prose.';
+    }
+    if (systemText) body.system = systemText;
     if (params.tools?.length) {
       body.tools = params.tools.map((t) => ({
         name: t.name,
         description: t.description,
         input_schema: t.parameters ?? { type: 'object', properties: {} },
       }));
+    }
+    if (params.toolChoice !== undefined) {
+      body.tool_choice = toAnthropicToolChoice(params.toolChoice);
     }
     if (params.temperature !== undefined) body.temperature = params.temperature;
     if (params.stop?.length) body.stop_sequences = params.stop;
@@ -208,7 +246,7 @@ export class AnthropicProvider implements Provider {
       'anthropic-version': '2023-06-01',
     };
     try {
-      return await this.fetchImpl(`${this.baseUrl}/messages`, {
+      return await this.fetchImpl(`${this.baseUrl}${this.messagesPath}`, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),

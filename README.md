@@ -97,9 +97,41 @@ qwen3.7-plus          qwen3.6-plus    hy3
 Both expose live discovery: `mh.listModels('opencode-zen')` hits `GET https://opencode.ai/zen/v1/models`
 (and `…/zen/go/v1/models` for Go) to return the up-to-date list.
 
-> Note: Zen routes some families to native protocols (GPT models → `/responses`, Claude/Qwen/MiniMax →
-> `/messages`, Gemini → native). The OpenAI-compatible path covers all models listed on those endpoints;
-> dedicated native adapters for those families are planned.
+### Native Zen protocol routing
+
+Zen doesn't serve every family through the same wire protocol — `opencode-zen` automatically picks the
+right one per model family, so one provider id, one key, and every model just works:
+
+| Model family | Zen endpoint | Protocol |
+| --- | --- | --- |
+| `gpt-*`, `grok-*` | `/zen/v1/responses` | OpenAI Responses API |
+| `claude-*`, `qwen*` | `/zen/v1/messages` | Anthropic Messages API |
+| `gemini-*` | `/zen/v1/models/{id}:generateContent` | Google native GenerateContent |
+| everything else | `/zen/v1/chat/completions` | OpenAI-compatible |
+
+The routing is exposed as `zenProtocolForModel(model)` and the per-protocol adapters are also available
+standalone for advanced use:
+
+```ts
+import {
+  createZenResponsesProvider,
+  createZenMessagesProvider,
+  createZenGeminiProvider,
+} from 'modelhitch';
+
+// GPT/Grok family — OpenAI Responses API (input items, output_text/function_call)
+const zenResponses = createZenResponsesProvider();
+
+// Claude/Qwen family — Anthropic Messages API
+const zenMessages = createZenMessagesProvider();
+
+// Gemini family — Google native GenerateContent (functionCall/functionResponse)
+const zenGemini = createZenGeminiProvider();
+```
+
+All three accept an `OPENCODE_ZEN_API_KEY` (falling back to `OPENCODE_API_KEY`). Gemini goes to
+`https://opencode.ai/zen/v1/models/{model}:generateContent` (streaming: `:streamGenerateContent?alt=sse`)
+and authenticates with the `x-goog-api-key` header, exactly like the native Google API.
 
 ## BYOK — end-user keys stay on the device
 
@@ -268,6 +300,11 @@ Endpoints: `POST /v1/chat/completions` (stream + non-stream), `GET /v1/models[/:
 `GET /healthz`. Errors come back in the OpenAI envelope (`{ error: { message, type, code } }`)
 with mapped statuses (401 missing/invalid key, 429 rate limit, 404 model not found, 502 upstream).
 
+`tool_choice` and `response_format` are passed through to the underlying provider: OpenAI-style
+values (`auto`/`none`/`required`/`{type:"function",...}`, `json_object`, `json_schema`) are
+normalized and mapped per provider — Anthropic gets `tool_choice: {type: "tool"|"any"|...}` plus a
+JSON system hint, Ollama gets `tool_choice` + `format`, and the mock honors `none`.
+
 > The bridge makes the agent *loop* possible, but tool-call *quality* is the model's job —
 > models without function-calling training will still emit prose instead of JSON tool calls.
 > Google-specific extras (native AGENTS.md scanning, Gemini Interactions caching, AppFunctions)
@@ -283,13 +320,15 @@ npm run build       # tsup → dist (ESM + CJS + types)
 npm run example     # runs with the mock provider; set OPENCODE_ZEN_API_KEY or
                     # OPENCODE_GO_API_KEY to hit the real gateways
 npm run bridge      # local OpenAI-compatible endpoint for agentic IDEs
+npm run canary      # end-to-end tool-call test through the bridge (needs a Zen key)
 ```
 
 ## Roadmap
 
-* Native Zen adapters for `/responses` (GPT family) and `/messages` (Claude family) routing
+* ~~Native Zen adapters for `/responses` (GPT family) and `/messages` (Claude family) routing~~ ✅ done
+* ~~`tool_choice` / `response_format` passthrough on the bridge~~ ✅ done
+* ~~Gemini native adapter for Zen (`gemini-*` models)~~ ✅ done
 * Streaming tool-call chaining helper
-* `tool_choice` / `response_format` passthrough on the bridge
 * Usage/cost tracking hooks
 * React hooks (`useChat`, `useStream`) for the BYOK UI
 * More local providers (vLLM, llama.cpp, KoboldCpp)

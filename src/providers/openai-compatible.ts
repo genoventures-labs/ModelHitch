@@ -6,8 +6,10 @@ import type {
   ContentPart,
   ModelMessage,
   ProviderCredentials,
+  ResponseFormat,
   StreamChunk,
   ToolCall,
+  ToolChoice,
   Usage,
 } from '../core/types.js';
 import { safeJsonParse } from '../core/json.js';
@@ -117,6 +119,31 @@ function toOpenAIMessages(messages: ModelMessage[]): OpenAIMessage[] {
 function toOpenAITools(tools: ChatParams['tools']): Array<{ type: string; function: unknown }> | undefined {
   if (!tools?.length) return undefined;
   return tools.map((t) => ({ type: 'function', function: t }));
+}
+
+/** Map a normalized ToolChoice to the OpenAI wire format. */
+function toOpenAIToolChoice(choice: ToolChoice | undefined): unknown {
+  if (!choice) return undefined;
+  if (choice === 'auto' || choice === 'none' || choice === 'required') return choice;
+  return { type: 'function', function: { name: choice.name } };
+}
+
+/** Map a normalized ResponseFormat to the OpenAI wire format. */
+function toOpenAIResponseFormat(format: ResponseFormat | undefined): unknown {
+  if (!format) return undefined;
+  if (format === 'text') return { type: 'text' };
+  if (format === 'json') return { type: 'json_object' };
+  if (format.type === 'json_schema') {
+    return {
+      type: 'json_schema',
+      json_schema: {
+        name: format.name ?? 'response',
+        strict: format.strict ?? false,
+        schema: format.schema,
+      },
+    };
+  }
+  return format;
 }
 
 function toUsage(u?: OpenAIUsage): Usage | undefined {
@@ -251,6 +278,10 @@ export class OpenAICompatibleProvider implements Provider {
     if (params.temperature !== undefined) body.temperature = params.temperature;
     if (params.maxTokens !== undefined) body.max_tokens = params.maxTokens;
     if (params.stop?.length) body.stop = params.stop;
+    if (params.toolChoice !== undefined) body.tool_choice = toOpenAIToolChoice(params.toolChoice);
+    if (params.responseFormat !== undefined && params.responseFormat !== 'text') {
+      body.response_format = toOpenAIResponseFormat(params.responseFormat);
+    }
     if (stream) {
       body.stream = true;
       body.stream_options = { include_usage: true };

@@ -1,5 +1,9 @@
 import type { Provider } from './types.js';
 import { createOpenAICompatibleProvider, type OpenAICompatibleConfig } from './openai-compatible.js';
+import { createZenResponsesProvider } from './zen-responses.js';
+import { createZenMessagesProvider } from './zen-messages.js';
+import { createZenGeminiProvider } from './zen-gemini.js';
+import type { ChatParams, ProviderCredentials, StreamChunk } from '../core/types.js';
 
 /**
  * OpenCode Zen & OpenCode Go — the OpenCode team's gateways.
@@ -9,13 +13,28 @@ import { createOpenAICompatibleProvider, type OpenAICompatibleConfig } from './o
  * - Go   (https://opencode.ai/docs/go):  low-cost subscription ($5 first month, then $10/mo)
  *        for tested open coding models. Base: https://opencode.ai/zen/go/v1
  *
- * Both authenticate with an API key from https://opencode.ai/auth and expose an
- * OpenAI-compatible /chat/completions endpoint for most models, plus GET /models
- * for discovery. Zen also routes some families to their native protocols
- * (GPT models -> /responses, Claude/Qwen/MiniMax -> /messages, Gemini -> native),
- * which ModelHitch will support via dedicated adapters later — the OpenAI-
- * compatible path covers every model listed on those native endpoints today.
+ * Both authenticate with an API key from https://opencode.ai/auth. Zen exposes
+ * several protocols; ModelHitch picks the right one per model family:
+ *
+ *   - gpt-* / grok-*   -> OpenAI Responses API        (/responses)
+ *   - claude-* / qwen* -> Anthropic Messages API      (/messages)
+ *   - gemini-*         -> Google native GenerateContent (models/{model}:generateContent)
+ *   - everything else  -> OpenAI-compatible chat      (/chat/completions)
+ *
+ * The single `opencodeZen` provider routes automatically, so one provider id,
+ * one key, and every model works.
  */
+
+/** The wire protocol Zen uses for a given model id. */
+export type ZenProtocol = 'responses' | 'messages' | 'gemini' | 'chat-completions';
+
+export function zenProtocolForModel(model: string): ZenProtocol {
+  const m = model.toLowerCase();
+  if (m.startsWith('gpt-') || m.startsWith('grok-')) return 'responses';
+  if (m.startsWith('claude-') || m.startsWith('qwen')) return 'messages';
+  if (m.startsWith('gemini-')) return 'gemini';
+  return 'chat-completions';
+}
 
 /** Curated, non-deprecated Zen model ids (see https://opencode.ai/docs/zen). */
 export const OPENCODE_ZEN_MODELS = [
@@ -138,9 +157,9 @@ function openCodeConfig(
   };
 }
 
-/** OpenCode Zen — curated premium models, pay-as-you-go. */
+/** OpenCode Zen — curated premium models, pay-as-you-go (auto-routes by family). */
 export function createOpenCodeZenProvider(opts: OpenCodeProviderOptions = {}): Provider {
-  return createOpenAICompatibleProvider(
+  const zenChat = createOpenAICompatibleProvider(
     openCodeConfig(
       'opencode-zen',
       'OpenCode Zen',
@@ -151,6 +170,61 @@ export function createOpenCodeZenProvider(opts: OpenCodeProviderOptions = {}): P
       opts,
     ),
   );
+  const zenResponses = createZenResponsesProvider({
+    baseUrl: 'https://opencode.ai/zen/v1',
+    apiKeyEnvVar: 'OPENCODE_ZEN_API_KEY',
+    apiKeyEnvFallbacks: ['OPENCODE_API_KEY'],
+    defaultModel: opts.defaultModel ?? 'gpt-5.6-luna',
+    fetchImpl: opts.fetchImpl,
+  });
+  const zenMessages = createZenMessagesProvider({ fetchImpl: opts.fetchImpl });
+  const zenGemini = createZenGeminiProvider({
+    baseUrl: 'https://opencode.ai/zen/v1',
+    apiKeyEnvVar: 'OPENCODE_ZEN_API_KEY',
+    apiKeyEnvFallbacks: ['OPENCODE_API_KEY'],
+    defaultModel: opts.defaultModel ?? 'gemini-3.5-flash-lite',
+    fetchImpl: opts.fetchImpl,
+  });
+
+  const route = (model: string) => zenProtocolForModel(model);
+
+  return {
+    id: 'opencode-zen',
+    name: 'OpenCode Zen',
+    defaultModel: opts.defaultModel ?? 'big-pickle',
+    capabilities: zenChat.capabilities,
+    async chat(params: ChatParams, credentials: ProviderCredentials) {
+      switch (route(params.model)) {
+        case 'responses':
+          return zenResponses.chat(params, credentials);
+        case 'messages':
+          return zenMessages.chat(params, credentials);
+        case 'gemini':
+          return zenGemini.chat(params, credentials);
+        default:
+          return zenChat.chat(params, credentials);
+      }
+    },
+    async *stream(params: ChatParams, credentials: ProviderCredentials): AsyncGenerator<StreamChunk> {
+      switch (route(params.model)) {
+        case 'responses':
+          yield* zenResponses.stream(params, credentials);
+          return;
+        case 'messages':
+          yield* zenMessages.stream(params, credentials);
+          return;
+        case 'gemini':
+          yield* zenGemini.stream(params, credentials);
+          return;
+        default:
+          yield* zenChat.stream(params, credentials);
+          return;
+      }
+    },
+    async listModels(credentials: ProviderCredentials) {
+      return zenChat.listModels ? zenChat.listModels(credentials) : [];
+    },
+  };
 }
 
 /** OpenCode Go — low-cost subscription for tested open coding models. */

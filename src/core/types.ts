@@ -25,7 +25,26 @@ export interface ToolCall {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  /**
+   * Provider-specific token the model requires when the client re-sends the
+   * tool call on the next turn (e.g. Gemini's `thoughtSignature`).
+   */
+  thoughtSignature?: string;
 }
+
+/** How the model should decide which tool to call. */
+export type ToolChoice =
+  | 'auto'
+  | 'none'
+  | 'required'
+  | { type: 'function'; name: string };
+
+/** Structured output request. */
+export type ResponseFormat =
+  | 'text'
+  | 'json'
+  | { type: 'json_object' }
+  | { type: 'json_schema'; name?: string; strict?: boolean; schema: Record<string, unknown> };
 
 /** Normalized, provider-agnostic parameters for a chat request. */
 export interface ChatParams {
@@ -36,6 +55,10 @@ export interface ChatParams {
   temperature?: number;
   maxTokens?: number;
   stop?: string[];
+  /** Which tool the model should pick (defaults to provider behavior, usually "auto"). */
+  toolChoice?: ToolChoice;
+  /** Structured output request (JSON mode / JSON Schema). */
+  responseFormat?: ResponseFormat;
   signal?: AbortSignal;
 }
 
@@ -58,7 +81,7 @@ export interface ChatResult {
 /** A single normalized streaming event. */
 export type StreamChunk =
   | { type: 'text-delta'; text: string }
-  | { type: 'tool-call-start'; id: string; name: string }
+  | { type: 'tool-call-start'; id: string; name: string; thoughtSignature?: string }
   | { type: 'tool-call-args-delta'; id: string; argsDelta: string }
   | { type: 'tool-call-end'; id: string }
   | { type: 'finish'; finishReason: string; usage?: Usage };

@@ -1,6 +1,6 @@
 {
   "name": "modelhitch",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Plug-and-play BYOK integration layer — hitch any AI provider or model to your app.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -26,7 +26,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "example": "tsx examples/quickstart.ts",
-    "bridge": "tsx examples/studio-bridge.ts"
+    "bridge": "tsx examples/studio-bridge.ts",
+    "canary": "tsx examples/canary.ts"
   },
   "keywords": [
     "ai",

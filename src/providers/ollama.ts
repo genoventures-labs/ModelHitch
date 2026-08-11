@@ -120,6 +120,17 @@ export class OllamaProvider implements Provider {
     if (params.tools?.length) {
       body.tools = params.tools.map((t) => ({ type: 'function', function: t }));
     }
+    if (params.toolChoice !== undefined) {
+      // Ollama supports auto/none/required; a specific tool maps to "required".
+      body.tool_choice =
+        typeof params.toolChoice === 'object' ? 'required' : params.toolChoice;
+    }
+    if (params.responseFormat && params.responseFormat !== 'text') {
+      body.format =
+        params.responseFormat === 'json' || params.responseFormat.type === 'json_object'
+          ? 'json'
+          : params.responseFormat.schema;
+    }
     return body;
   }
 

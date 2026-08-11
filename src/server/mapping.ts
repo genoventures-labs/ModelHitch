@@ -84,6 +84,7 @@ function toModelHitchToolCalls(toolCalls: OpenAIToolCallInput[] | undefined): To
       id: tc.id ?? `call_${i}`,
       name: tc.function?.name ?? 'unknown',
       arguments: safeJsonParse<Record<string, unknown>>(tc.function?.arguments ?? '', {}),
+      ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
     });
   }
   return out.length ? out : undefined;
@@ -114,7 +115,48 @@ export function mapRequest(body: OpenAIChatRequest, model: string): ChatParams {
   const maxTokens = body.max_tokens ?? body.max_completion_tokens;
   if (maxTokens !== undefined) params.maxTokens = maxTokens;
   if (body.stop?.length) params.stop = body.stop;
+  const toolChoice = toModelHitchToolChoice(body.tool_choice);
+  if (toolChoice !== undefined) params.toolChoice = toolChoice;
+  const responseFormat = toModelHitchResponseFormat(body.response_format);
+  if (responseFormat !== undefined) params.responseFormat = responseFormat;
   return params;
+}
+
+/** Normalize an OpenAI `tool_choice` value; unknown shapes fall back to undefined. */
+export function toModelHitchToolChoice(value: unknown): ChatParams['toolChoice'] | undefined {
+  if (value === 'auto' || value === 'none' || value === 'required') return value;
+  if (value && typeof value === 'object') {
+    const obj = value as { type?: string; function?: { name?: string }; name?: string };
+    if (obj.type === 'function') {
+      const name = obj.function?.name ?? obj.name;
+      if (name) return { type: 'function', name };
+    }
+  }
+  return undefined;
+}
+
+/** Normalize an OpenAI `response_format` value; unknown shapes fall back to undefined. */
+export function toModelHitchResponseFormat(value: unknown): ChatParams['responseFormat'] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value === 'json') return 'json';
+  if (value === 'text') return 'text';
+  if (value && typeof value === 'object') {
+    const obj = value as {
+      type?: string;
+      json_schema?: { name?: string; strict?: boolean; schema?: Record<string, unknown> };
+    };
+    if (obj.type === 'text') return 'text';
+    if (obj.type === 'json_object') return 'json';
+    if (obj.type === 'json_schema' && obj.json_schema?.schema) {
+      return {
+        type: 'json_schema',
+        name: obj.json_schema.name,
+        strict: obj.json_schema.strict,
+        schema: obj.json_schema.schema,
+      };
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -190,6 +232,7 @@ export function toChatCompletion(result: ChatResult, model: string): OpenAIChatC
     id: tc.id,
     type: 'function' as const,
     function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+    ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
   }));
   return {
     id: `chatcmpl-${randomUUID()}`,

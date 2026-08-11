@@ -87,12 +87,13 @@ describe('OpenCode Zen provider', () => {
     expect(result.usage?.totalTokens).toBe(18);
   });
 
-  it('maps 401 to invalid-api-key', async () => {
-    const { fetchImpl } = mockFetch({ status: 401 });
+  it('maps 401 to invalid-api-key (GPT models route to the Responses API)', async () => {
+    const { fetchImpl, calls } = mockFetch({ status: 401 });
     const zen = createOpenCodeZenProvider({ fetchImpl });
     await expect(
       zen.chat({ model: 'gpt-5.6-luna', messages: [{ role: 'user', content: 'hi' }] }, CREDENTIALS),
-    ).rejects.toMatchObject({ code: 'invalid-api-key', providerId: 'opencode-zen' });
+    ).rejects.toMatchObject({ code: 'invalid-api-key', providerId: 'zen-responses' });
+    expect(calls[0]!.url).toBe('https://opencode.ai/zen/v1/responses');
   });
 
   it('maps 404 to model-not-found', async () => {

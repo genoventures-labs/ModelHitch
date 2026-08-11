@@ -210,7 +210,15 @@ export class OpenAICompatibleServer {
             toolIndex.set(event.id, index);
             const delta = {
               role: 'assistant',
-              tool_calls: [{ index, id: event.id, type: 'function', function: { name: event.name, arguments: '' } }],
+              tool_calls: [
+                {
+                  index,
+                  id: event.id,
+                  type: 'function',
+                  function: { name: event.name, arguments: '' },
+                  ...(event.thoughtSignature ? { thoughtSignature: event.thoughtSignature } : {}),
+                },
+              ],
             };
             write({ ...chunkBase, choices: [{ index: 0, delta, finish_reason: null }] });
             break;
