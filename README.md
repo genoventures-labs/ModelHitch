@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="repo_assets/repo_banner.png" alt="ModelHitch — Temp intelligence. No questions." width="100%"/>
+</p>
+
 # ModelHitch
 
-**Tagline:** Hitch any model to your app.
+**Hitch any model to your app.** Clock in. Ship code. Don't ask questions.
+
+> Provider harness by day. Temp agency for LLMs by accident.
 
 ModelHitch is a plug-and-play **BYOK** (bring-your-own-key) integration layer for applications.
 It lets developers add support for user-supplied AI providers, models, or API keys without
@@ -11,15 +17,19 @@ Integrate once — then let each end user connect the AI provider or model they 
 > ModelHitch is not an AI model. It is the attachment point between an application and the
 > model the user chooses to bring.
 
-## What it does
+## What we do
 
-* **One normalized interface** — `chat()` and `stream()` that speak the same types for every provider.
-* **Provider adapters** — OpenAI-compatible, Anthropic, Ollama, and the OpenCode gateways out of the box.
-* **BYOK credential handling** — user keys stay client-side; never touch your backend.
-* **Streaming normalization** — every provider's stream becomes the same `StreamChunk` events.
-* **Capability detection** — ask a provider what it can do (`streaming`, `toolCalling`, `vision`, …).
-* **Error normalization** — one `ModelHitchError` with stable codes (`invalid-api-key`, `rate-limited`, …).
-* **Easy embedding** — one package, works in Node ≥18, browsers, and edge runtimes.
+<p align="center">
+  <img src="repo_assets/own_section.png" alt="One interface. BYOK. Always. Any model, any time. Switch, swap, ship. No questions. Just results." width="85%"/>
+</p>
+
+* **One interface.** — `chat()` and `stream()` that speak the same types for every provider.
+* **Any model, any time.** — OpenAI-compatible, Anthropic, Ollama, and the OpenCode gateways out of the box. Switch, swap, ship.
+* **BYOK. Always.** — user keys stay client-side; never touch your backend. Keys stay yours.
+* **Stream normalization.** — every provider's stream becomes the same `StreamChunk` events. Different wires, same stream.
+* **Capability detection.** — ask a provider what it can do (`streaming`, `toolCalling`, `vision`, …).
+* **No questions. Just results.** — one `ModelHitchError` with stable codes (`invalid-api-key`, `rate-limited`, …).
+* **Easy embedding.** — one package, works in Node ≥18, browsers, and edge runtimes.
 
 ## Quickstart
 
@@ -322,6 +332,9 @@ for anything else.
 
 ## Agentic IDE bridge (Android Studio, JetBrains, ...)
 
+> **Today's assignments:** Claude — code review · Codex — responses · Gemini CLI — research ·
+> Android Studio — ship it. Doesn't matter who's in the house. Clock in, work, don't ask questions.
+
 ModelHitch can serve as a **local OpenAI-compatible endpoint**, so agentic IDEs that accept a
 "custom model endpoint" can drive every registered provider — tools, multi-turn roles, and SSE
 streaming included. This is how you run Android Studio's Agent Mode against OpenCode Zen/Go,
@@ -344,8 +357,8 @@ setting)** → paste `http://127.0.0.1:3939/v1`. Model ids from `GET /v1/models`
 picker; keys are resolved per provider on your machine (`apiKeys` map → `KeyStore` → env var),
 never sent anywhere.
 
-**Model routing** — prefix a model id with a provider to target it explicitly; bare ids go to the
-default provider:
+**Model routing — who's my agent?** Prefix a model id with a provider to target it explicitly;
+bare ids go to the default provider:
 
 | Request model | Routes to |
 | --- | --- |
@@ -646,6 +659,30 @@ npm run canary      # end-to-end tool-call test through the bridge (needs a Zen 
 * ~~Usage/cost tracking hooks~~ ✅ done
 * ~~React hooks (`useChat`, `useStream`) for the BYOK UI~~ ✅ done
 
+## The rules (contributing)
+
+<p align="center">
+  <img src="repo_assets/contrib_image.png" alt="LLM Temp Agency — Rules are rules: you can clone, you can look, you can modify your own version. Public contributions are closed." width="85%"/>
+</p>
+
+* **You can clone.**
+* **You can look.**
+* **You can even modify your own version.**
+
+Public contributions are closed. No benefits. No memory. Just output.
+
+Respect the hitch. Keep the flow.
+
 ## License
 
 MIT
+
+---
+
+<p align="center">
+  <img src="repo_assets/hitch_meme.png" alt="Mutant Ninja Temps — Clock in, ship code, don't ask questions. Doesn't matter who's in the house." width="90%"/>
+</p>
+
+<p align="center">
+  <img src="repo_assets/footer_repo.png" alt="ModelHitch — We route. You build. Fast. Light. Reliable. No bloat. Just routes. Built by devs, for devs." width="90%"/>
+</p>
