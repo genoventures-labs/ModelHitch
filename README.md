@@ -400,6 +400,139 @@ Notes:
 - `POST /v1/messages/count_tokens` is served with a cheap char-count estimate, so Claude Code
   never has to fall back to a counting inference call.
 
+### Gemini CLI as a client
+
+Gemini CLI talks to any **Google Generative Language** endpoint: set
+`GOOGLE_GEMINI_BASE_URL` to a custom base URL (HTTPS is required *unless* it points at
+localhost — `http://127.0.0.1:3939` is fine) and Gemini CLI treats the bridge as a Google
+backend, passing model ids through in the URL path. The bridge exposes that wire at
+`POST /v1beta/models/{model}:generateContent` (and `:streamGenerateContent?alt=sse`), so
+Gemini CLI gets the same family routing, tools, multi-turn `functionCall` /
+`functionResponse` parts, and SSE streaming as every other client.
+
+1. Start the bridge: `npm run bridge`
+2. Export the gateway env vars in your shell (Gemini CLI reads these):
+
+```bash
+export GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:3939"   # no /v1beta — Gemini CLI appends /v1beta/models/...
+export GEMINI_API_KEY="local-bridge"                     # any dummy value — the bridge resolves keys itself
+export GEMINI_MODEL="gemini-3.5-flash-lite"              # or any id from GET /v1/models
+```
+
+3. Run `gemini`. Requests are routed by family (`gemini-*` → Google native outbound,
+   everything else → the matching wire); `GEMINI_MODEL`, `--model`, and per-provider
+   `modelConfigs` in `settings.json` all work as model pins.
+
+Notes:
+
+- **Always stream** — Gemini CLI uses `:streamGenerateContent?alt=sse` for inference; the
+  bridge emits one partial `GenerateContentResponse` JSON per `data:` line (no `[DONE]`
+  sentinel, matching the real API). Non-stream `:generateContent` works for curl.
+- **Don't set a real `GEMINI_API_KEY`** — the bridge resolves keys locally (`apiKeys` →
+  `KeyStore` → env var); the incoming `x-goog-api-key` header is read for auth presence only
+  (any value works).
+- **`functionCall.args` is a JSON *object*** on the Google wire (not a string like OpenAI);
+  streaming carries partial JSON-string `args` deltas that concatenate into the object. Tool
+  results come back as `functionResponse` parts keyed by function **name** — the bridge
+  matches them to the previous call id per turn.
+- **Thinking models** (`gemini-*` thinking variants) echo a `thoughtSignature` next to each
+  `functionCall`; the bridge carries it through turn 2 so multi-turn tool loops don't 400.
+- Gemini CLI extras are stripped before routing: `safetySettings`, `cachedContent`,
+  `userAgent`, `googleSearch` / `urlContext` tool definitions, and `thinkingConfig` are all
+  ignored, never rejected.
+- Model ids live in the **URL path** (`/v1beta/models/{model}:generateContent`), so
+  `provider/model` prefixes route exactly like every other wire; `v1alpha` / `v1` path
+  prefixes are tolerated for clients that pin `GOOGLE_GENAI_API_VERSION`.
+
+### Other agent harnesses
+
+Every harness below has a "custom endpoint" knob that points at one of the four wires the
+bridge speaks, so they all get the same family routing, tools, multi-turn, and streaming with
+**no bridge changes**. Model ids come from `GET /v1/models` (or just use any bare id for the
+default provider).
+
+| Harness | Wire used | Key knob | Base URL to use |
+|---|---|---|---|
+| Codex CLI | Responses | `base_url` in `~/.codex/config.toml` | `http://127.0.0.1:3939/v1` |
+| Claude Code | Anthropic Messages | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:3939` |
+| Gemini CLI | Google native | `GOOGLE_GEMINI_BASE_URL` | `http://127.0.0.1:3939` |
+| Aider | chat-completions (or Messages) | `--openai-api-base` (or `ANTHROPIC_BASE_URL`) | `http://127.0.0.1:3939/v1` |
+| Continue (VS Code) | chat-completions (or Messages) | `apiBase` in `~/.continue/config.yaml` | `http://127.0.0.1:3939/v1` |
+| Cline / Roo / Kilo (VS Code) | chat-completions (or Messages) | provider "OpenAI Compatible" | `http://127.0.0.1:3939/v1` |
+| Goose (Block) | chat-completions (or Messages) | `GOOSE_PROVIDER__HOST` env | `http://127.0.0.1:3939/v1` |
+| OpenCode CLI | chat-completions (or Messages) | provider `@ai-sdk/openai-compatible` | `http://127.0.0.1:3939/v1` |
+| Zed | chat-completions | `provider` in `settings.json` | `http://127.0.0.1:3939/v1` |
+| Qoder, OpenHands, anything OpenAI-compatible | chat-completions | any "OpenAI API base" field | `http://127.0.0.1:3939/v1` |
+
+> The bridge resolves API keys itself (`apiKeys` → `KeyStore` → env var), so every snippet uses
+> a **dummy key** — the harness never needs your real key. `anthropic`-wire variants (Aider,
+> Continue, Cline, Goose, OpenCode) use `http://127.0.0.1:3939` (no `/v1`) and a dummy
+> `ANTHROPIC_AUTH_TOKEN`-style key; chat-completions variants use `http://127.0.0.1:3939/v1`.
+> Exact key names drift between harness versions — when in doubt, point the harness's
+> "custom OpenAI base URL" field at the `/v1` URL and pick a model id from `GET /v1/models`.
+
+**Aider**
+```bash
+aider --openai-api-base http://127.0.0.1:3939/v1 --openai-api-key dummy \
+      --model openai/deepseek-v4-flash
+# Anthropic wire instead:
+#   export ANTHROPIC_BASE_URL=http://127.0.0.1:3939
+#   aider --model anthropic/deepseek-v4-flash
+```
+
+**Continue** — `~/.continue/config.yaml`
+```yaml
+models:
+  - name: deepseek-v4-flash
+    provider: openai
+    apiBase: http://127.0.0.1:3939/v1
+    apiKey: dummy
+```
+
+**Cline / Roo Code / Kilo Code** — add an "OpenAI Compatible" provider in the extension settings:
+```
+Base URL:  http://127.0.0.1:3939/v1
+API key:   dummy            # any value; the bridge ignores it
+Model id:  deepseek-v4-flash  # or any id from GET /v1/models
+```
+
+**Goose (Block)** — `~/.config/goose/config.yaml` (or env vars)
+```yaml
+GOOSE_PROVIDER__TYPE: openai
+GOOSE_PROVIDER__HOST: http://127.0.0.1:3939/v1
+GOOSE_PROVIDER__TOKEN: dummy
+GOOSE_MODEL: deepseek-v4-flash
+```
+
+**OpenCode CLI** — `opencode.json`
+```json
+{
+  "provider": {
+    "modelhitch": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "ModelHitch (OpenCode Zen via local bridge)",
+      "options": { "baseURL": "http://127.0.0.1:3939/v1", "apiKey": "dummy" }
+    }
+  },
+  "model": "modelhitch/deepseek-v4-flash"
+}
+```
+
+**Zed** — `settings.json`
+```json
+{
+  "assistant": {
+    "version": "2",
+    "provider": {
+      "type": "openai",
+      "api_url": "http://127.0.0.1:3939/v1",
+      "model": { "name": "deepseek-v4-flash" }
+    }
+  },
+  "default_model": { "provider": "modelhitch", "model": "deepseek-v4-flash" }
+}
+```
+
 ## Development
 
 ```bash
@@ -420,6 +553,8 @@ npm run canary      # end-to-end tool-call test through the bridge (needs a Zen 
 * ~~Gemini native adapter for Zen (`gemini-*` models)~~ ✅ done
 * ~~Codex CLI wire protocol (`/v1/responses`) on the bridge~~ ✅ done
 * ~~Claude Code gateway wire protocol (`/v1/messages`) on the bridge~~ ✅ done
+* ~~Harness compatibility matrix (Aider, Continue, Cline, Goose, OpenCode, Zed, ...)~~ ✅ done
+* ~~Gemini CLI wire protocol (`:generateContent`) on the bridge~~ ✅ done
 * Streaming tool-call chaining helper
 * Usage/cost tracking hooks
 * React hooks (`useChat`, `useStream`) for the BYOK UI

@@ -18,6 +18,8 @@
  *   4. gemini-3.5-flash-lite -> models/{id}:generateContent (Google native)
  *   5. gpt-5.6-luna via /v1/responses (Codex CLI wire protocol, full bridge)
  *   6. deepseek-v4-flash via /v1/messages (Claude Code gateway wire protocol)
+ *   7. gemini-3.5-flash-lite via /v1beta/models/{id}:streamGenerateContent
+ *      (Gemini CLI wire protocol, full bridge)
  *
  * Exits 0 only when every case completes a streamed tool call and then
  * correctly uses the tool result in its final answer.
@@ -97,6 +99,24 @@ const ANTHROPIC_TOOL_DEF = {
   },
 };
 
+/** Google `functionDeclarations` tool shape — what Gemini CLI sends to the bridge. */
+const GEMINI_TOOL_DEF = {
+  functionDeclarations: [
+    {
+      name: TOOL_NAME,
+      description:
+        'Fetch the Android SDK configuration (compileSdk, minSdk, targetSdk) for the current project. Call this before suggesting Gradle or manifest changes.',
+      parameters: {
+        type: 'object',
+        properties: {
+          sdkVersion: { type: 'string', description: "The Android SDK API level to inspect, e.g. '36'." },
+        },
+        required: ['sdkVersion'],
+      },
+    },
+  ],
+};
+
 const PROMPT =
   'Act as the Android Studio agent inspecting this project. Before answering anything, you MUST call the ' +
   'get_android_sdk tool with sdkVersion "36". After you receive the tool result, report the compileSdk value in your final answer.';
@@ -108,7 +128,7 @@ function executeTool(name: string, args: Record<string, unknown>): string {
   return JSON.stringify({ compileSdk: 36, minSdk: 24, targetSdk: 36, buildTools: `${sdkVersion}.0.0` });
 }
 
-const CASES: Array<{ label: string; model: string; forceTool: boolean; wire?: 'responses' | 'anthropic' }> = [
+const CASES: Array<{ label: string; model: string; forceTool: boolean; wire?: 'responses' | 'anthropic' | 'gemini' }> = [
   // deepseek is a thinking model: it rejects a *forced* tool_choice, so we
   // rely on the prompt to trigger the call with tool_choice 'auto'.
   // (big-pickle is currently upstream-rate-limited on this key.)
@@ -124,6 +144,10 @@ const CASES: Array<{ label: string; model: string; forceTool: boolean; wire?: 'r
   // Claude Code speaks the Anthropic Messages wire to any LLM gateway
   // (ANTHROPIC_BASE_URL) — proves /v1/messages -> bridge -> family router -> Zen.
   { label: 'anthropic-wire (/v1/messages)', model: 'deepseek-v4-flash', forceTool: false, wire: 'anthropic' },
+  // Gemini CLI speaks the Google Generative Language wire to any custom
+  // GOOGLE_GEMINI_BASE_URL — proves /v1beta/models/{id}:streamGenerateContent
+  // -> bridge -> family router -> Zen (same family: gemini native outbound).
+  { label: 'gemini-wire (:streamGenerateContent)', model: 'gemini-3.5-flash-lite', forceTool: true, wire: 'gemini' },
 ];
 
 async function* ssePayloads(res: Response): AsyncGenerator<string> {
@@ -434,6 +458,117 @@ async function answerWithAnthropicResult(
     .join('');
 }
 
+/**
+ * Turn 1 via the Gemini CLI wire: streamed POST
+ * /v1beta/models/{model}:streamGenerateContent?alt=sse (Google SSE: one
+ * partial GenerateContentResponse JSON per `data:` line, no [DONE]).
+ */
+async function streamGeminiToolCall(
+  base: string,
+  model: string,
+  forceTool: boolean,
+  signal: AbortSignal,
+): Promise<TurnOne> {
+  const res = await fetch(`${base}/v1beta/models/${model}:streamGenerateContent?alt=sse`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': 'test-key' },
+    signal,
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: PROMPT }] }],
+      tools: [GEMINI_TOOL_DEF],
+      toolConfig: forceTool
+        ? { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [TOOL_NAME] } }
+        : undefined,
+      // Gemini CLI sends Google extras; the bridge must tolerate them.
+      safetySettings: [{ category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' }],
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  }
+  const out: TurnOne = { content: '', toolCalls: [], finishReason: null };
+  for await (const payload of ssePayloads(res)) {
+    const chunk = JSON.parse(payload);
+    if (chunk.error) throw new Error(`upstream error: ${chunk.error?.message ?? JSON.stringify(chunk.error)}`);
+    const candidate = chunk.candidates?.[0];
+    for (const part of candidate?.content?.parts ?? []) {
+      if (part.text) out.content += part.text;
+      const fc = part.functionCall;
+      if (!fc) continue;
+      const last = out.toolCalls[out.toolCalls.length - 1];
+      // Opening chunk carries id + name (+ object args, like the real API);
+      // continuation chunks carry only partial JSON-string args and belong to
+      // the in-flight call (Gemini has no per-chunk index on functionCall).
+      if (fc.id || fc.name) {
+        // Opening chunk: args may be absent (partials follow), a complete
+        // object, or already a JSON string — never seed with a bare "{}".
+        const acc: AccToolCall = {
+          id: fc.id ?? `call_${out.toolCalls.length}`,
+          name: fc.name ?? '',
+          args:
+            fc.args == null
+              ? ''
+              : typeof fc.args === 'string'
+                ? fc.args
+                : JSON.stringify(fc.args),
+        };
+        out.toolCalls.push(acc);
+      } else if (last && typeof fc.args === 'string') {
+        last.args += fc.args;
+      }
+      if (part.thoughtSignature && last) last.thoughtSignature = part.thoughtSignature;
+    }
+    if (candidate?.finishReason) out.finishReason = candidate.finishReason;
+  }
+  return out;
+}
+
+/**
+ * Turn 2 via the Gemini CLI wire: non-stream POST
+ * /v1beta/models/{model}:generateContent with the functionResponse part. The
+ * model turn must echo the functionCall (with thoughtSignature, if any) and
+ * the user turn carries the tool result; NONE mode forces a plain answer.
+ */
+async function answerWithGeminiResult(
+  base: string,
+  model: string,
+  turn: TurnOne,
+  result: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const first = turn.toolCalls[0]!;
+  const res = await fetch(`${base}/v1beta/models/${model}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': 'test-key' },
+    signal,
+    body: JSON.stringify({
+      contents: [
+        { role: 'user', parts: [{ text: PROMPT }] },
+        {
+          role: 'model',
+          parts: [
+            ...(turn.content ? [{ text: turn.content }] : []),
+            {
+              ...(first.thoughtSignature ? { thoughtSignature: first.thoughtSignature } : {}),
+              functionCall: { name: first.name, args: JSON.parse(first.args || '{}') },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ functionResponse: { name: first.name, response: JSON.parse(result) } }] },
+      ],
+      tools: [GEMINI_TOOL_DEF],
+      toolConfig: { functionCallingConfig: { mode: 'NONE' } },
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  }
+  const data = await res.json();
+  return (data.candidates?.[0]?.content?.parts ?? [])
+    .map((p: { text?: string }) => p.text ?? '')
+    .join('');
+}
+
 async function main() {
   const server = createModelHitchServer({
     providers: undefined, // built-in set includes opencodeZen
@@ -459,7 +594,9 @@ async function main() {
           ? await streamResponsesToolCall(url, c.model, c.forceTool, signal)
           : c.wire === 'anthropic'
             ? await streamAnthropicToolCall(url, c.model, c.forceTool, signal)
-            : await streamToolCall(url, c.model, c.forceTool, signal);
+            : c.wire === 'gemini'
+              ? await streamGeminiToolCall(url, c.model, c.forceTool, signal)
+              : await streamToolCall(url, c.model, c.forceTool, signal);
       if (!turn.toolCalls.length) {
         throw new Error(`no tool call streamed (finish_reason=${turn.finishReason ?? 'none'}; text="${turn.content.slice(0, 80)}")`);
       }
@@ -475,7 +612,9 @@ async function main() {
           ? await answerWithResponsesResult(url, c.model, turn, result, signal)
           : c.wire === 'anthropic'
             ? await answerWithAnthropicResult(url, c.model, turn, result, signal)
-            : await answerWithResult(url, c.model, turn, result, signal);
+            : c.wire === 'gemini'
+              ? await answerWithGeminiResult(url, c.model, turn, result, signal)
+              : await answerWithResult(url, c.model, turn, result, signal);
 
       const routed = zenProtocolForModel(c.model);
       const ok =

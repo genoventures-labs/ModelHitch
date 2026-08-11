@@ -15,6 +15,14 @@ import {
   toAnthropicStreamEvents,
   type AnthropicRequest,
 } from './anthropic-wire.js';
+import {
+  estimateGeminiInputTokens,
+  mapGeminiRequest,
+  toGeminiCompletion,
+  toGeminiError,
+  toGeminiStreamEvents,
+  type GeminiRequest,
+} from './gemini-wire.js';
 import { mapResponsesRequest, toResponsesCompletion, toResponsesStreamEvents, type ResponsesRequest } from './responses.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 
@@ -59,6 +67,9 @@ const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
  * - `POST /v1/responses` (stream + non-stream — Codex CLI / Responses-API clients)
  * - `POST /v1/messages` (stream + non-stream — Claude Code / Anthropic-format clients)
  * - `POST /v1/messages/count_tokens` (Claude Code token counting)
+ * - `POST /v1beta/models/:model:generateContent` and
+ *   `POST /v1beta/models/:model:streamGenerateContent?alt=sse`
+ *   (Gemini CLI / Google-native clients)
  * - `GET /v1/models` and `GET /v1/models/:id`
  * - `HEAD /api/hello` (Claude Code connection-warming probe)
  * - `GET /healthz`
@@ -171,6 +182,28 @@ export class OpenAICompatibleServer {
       } catch (err) {
         if (res.headersSent) throw err;
         const { status, body } = toAnthropicError(err);
+        this.sendJson(res, status, body);
+      }
+      return;
+    }
+
+    // Gemini CLI / Google-native clients. Gemini CLI sends model ids in the
+    // *path* (`/v1beta/models/{model}:generateContent`), so the capture is
+    // `[^:]+` — `provider/model` prefixes survive for explicit routing.
+    // `v1alpha` / `v1` prefixes are tolerated (GOOGLE_GENAI_API_VERSION).
+    const geminiMatch = path.match(/^\/v1(?:beta|alpha)?\/models\/([^:]+):(generateContent|streamGenerateContent)$/);
+    if (method === 'POST' && geminiMatch) {
+      const modelFromPath = decodeURIComponent(geminiMatch[1] ?? '');
+      const isStream = geminiMatch[2] === 'streamGenerateContent';
+      this.log(`${method} ${path} ->`);
+      try {
+        await this.handleGemini(req, res, modelFromPath, isStream);
+      } catch (err) {
+        // Non-stream Gemini errors use the Google API error envelope.
+        if (res.headersSent) throw err;
+        const { status, body } = toGeminiError(err);
+        const error = body.error as { status?: string; message?: string };
+        this.log(`  !! HTTP ${status} ${error.status ?? 'INTERNAL'}: ${error.message ?? ''}`);
         this.sendJson(res, status, body);
       }
       return;
@@ -458,6 +491,77 @@ export class OpenAICompatibleServer {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
     }
     this.sendJson(res, 200, { input_tokens: estimateAnthropicInputTokens(body) });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Gemini generateContent (Gemini CLI / Google-native wire protocol)
+  // ---------------------------------------------------------------------------
+
+  private async handleGemini(
+    req: IncomingMessage,
+    res: ServerResponse,
+    modelFromPath: string,
+    stream: boolean,
+  ): Promise<void> {
+    const body = (await this.readBody(req)) as GeminiRequest | null;
+    if (!body || !Array.isArray(body.contents) || body.contents.length === 0) {
+      throw new ModelHitchError('bad-request', "The request body must include a non-empty 'contents' array.", { status: 400 });
+    }
+    // The model lives in the URL path for the Google wire; body.model (if any)
+    // is a fallback for clients that send it anyway.
+    const { provider, model } = routeModel(modelFromPath || body.model, this.providers, this.options.defaultProviderId);
+    const credentials = await this.resolveCredentials(provider.id);
+    const params = mapGeminiRequest(body, model);
+    if (this.options.defaultModel && !modelFromPath && !body.model) params.model = this.options.defaultModel;
+
+    if (stream) {
+      this.log(`  -> ${provider.id}/${model} (gemini stream)`);
+      await this.writeGeminiStream(res, provider, params, credentials, model, body);
+      return;
+    }
+
+    this.log(`  -> ${provider.id}/${model} (gemini)`);
+    const result = await provider.chat(params, credentials);
+    this.sendJson(res, 200, toGeminiCompletion(result, model, estimateGeminiInputTokens(body)));
+  }
+
+  /** Stream a normalized provider stream out as Google `:streamGenerateContent` SSE. */
+  private async writeGeminiStream(
+    res: ServerResponse,
+    provider: Provider,
+    params: ChatParams,
+    credentials: ProviderCredentials,
+    model: string,
+    body: GeminiRequest,
+  ): Promise<void> {
+    const controller = new AbortController();
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    // Abort the upstream call if the client disconnects mid-stream.
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+
+    try {
+      const stream = provider.stream({ ...params, signal: controller.signal }, credentials);
+      for await (const line of toGeminiStreamEvents(stream, model, estimateGeminiInputTokens(body))) {
+        res.write(line);
+      }
+      res.end();
+    } catch (err) {
+      if (res.writableEnded) return;
+      // Mid-stream failures surface as a Google error envelope chunk — the SDK
+      // reads `error` out of the SSE payload, same as a plain JSON error.
+      const { status, body: errBody } = toGeminiError(err);
+      res.write(`data: ${JSON.stringify(errBody)}\n\n`);
+      res.end();
+      this.log(`  !! ${provider.id} failed: HTTP ${status} ${(errBody.error as { status?: string })?.status ?? 'INTERNAL'}`);
+    }
   }
 
   // ---------------------------------------------------------------------------
