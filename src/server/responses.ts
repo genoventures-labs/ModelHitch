@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { safeJsonParse } from '../core/json.js';
 import { serializeText } from '../core/content.js';
-import { ModelHitchError } from '../core/errors.js';
 import { conversationFor } from './conversation-state.js';
 import type {
   ChatParams,
@@ -299,21 +298,52 @@ export function mapResponsesRequest(body: ResponsesRequest, model: string): Chat
  * field outright, so the bridge reconstructs the FULL conversation (cached
  * messages + this request's delta) and forwards it stateless.
  *
- * Returns the expanded messages to forward. Throws a clear error when the
- * referenced conversation is no longer cached (bridge restarted) — the delta
- * alone is unanswerable, and forwarding it would surface an opaque 400.
+ * Returns the expanded messages to forward. When the referenced conversation
+ * is no longer cached (bridge restarted): if this request itself is
+ * answerable (it carries real content, e.g. a fresh user message), it is
+ * forwarded stateless — losing history is better than failing the turn; if it
+ * is a delta-only turn (empty after mapping), the caller re-anchors it by
+ * tool call id or fails with a clear error.
  */
 export function resolveConversation(params: ChatParams, previousResponseId: string | undefined): ModelMessage[] {
   if (!previousResponseId) return params.messages;
   const prior = conversationFor(previousResponseId);
-  if (!prior) {
-    throw new ModelHitchError(
-      'bad-request',
-      `Conversation state for previous_response_id "${previousResponseId}" was lost (bridge restarted). Start a new chat.`,
-      { status: 400 },
-    );
+  if (prior) return [...prior, ...params.messages];
+  // Cache miss (bridge restart / eviction).
+  return params.messages;
+}
+
+/**
+ * Extract `function_call_output` items from a Responses `input` array — the
+ * raw tool results the client sends as a delta-only turn. Used to re-anchor
+ * such turns against the cache by call id when `previous_response_id` is
+ * missing or unresolvable.
+ */
+export function toolOutputsFromInput(input: unknown[] | undefined): Array<{ callId: string; output: string }> {
+  const out: Array<{ callId: string; output: string }> = [];
+  for (const raw of input ?? []) {
+    const item = raw as Record<string, unknown>;
+    if (item.type !== 'function_call_output') continue;
+    const callId = String(item.call_id ?? '');
+    if (!callId) continue;
+    const output = item.output;
+    let content: string;
+    if (typeof output === 'string') content = output;
+    else if (Array.isArray(output)) {
+      content = output
+        .map((p) => ((p as Record<string, unknown>).type === 'output_text' ? String((p as Record<string, unknown>).text ?? '') : ''))
+        .join('');
+    } else {
+      content = JSON.stringify(output ?? '');
+    }
+    out.push({ callId, output: content });
   }
-  return [...prior, ...params.messages];
+  return out;
+}
+
+/** Map extracted tool outputs to normalized `tool` messages. */
+export function toolMessagesFromOutputs(outputs: Array<{ callId: string; output: string }>): ModelMessage[] {
+  return outputs.map((o) => ({ role: 'tool', content: o.output, toolCallId: o.callId }));
 }
 
 /**

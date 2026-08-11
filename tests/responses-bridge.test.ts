@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   createModelHitchServer,
   mockProvider,
@@ -8,6 +8,7 @@ import {
   type Provider,
   type StreamChunk,
 } from '../src/index.js';
+import { clearConversations } from '../src/server/conversation-state.js';
 
 /**
  * End-to-end tests for `POST /v1/responses` — the OpenAI Responses API wire
@@ -328,6 +329,10 @@ describe('bridge POST /v1/responses — stateful continuation (previous_response
     await server2.close();
   });
 
+  // The conversation cache is module-level — isolate every test so chains
+  // can't leak across tests.
+  beforeEach(() => clearConversations());
+
   function responses2(body: unknown): Promise<Response> {
     return fetch(`${base2}/v1/responses`, {
       method: 'POST',
@@ -452,15 +457,58 @@ describe('bridge POST /v1/responses — stateful continuation (previous_response
     expect(body.error.message).toContain('Start a new chat');
   });
 
+  it('forwards a full request stateless when previous_response_id is lost but content exists', async () => {
+    received.length = 0;
+    const res = await responses2({
+      model: 'rec-model',
+      previous_response_id: 'resp_from_a_dead_bridge',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'what is 2+2?' }] }],
+    });
+    expect(res.status).toBe(200);
+    expect(received[0]!.params.previousResponseId).toBeUndefined();
+    expect(received[0]!.params.messages).toEqual([{ role: 'user', content: 'what is 2+2?' }]);
+  });
+
+  it('re-anchors a delta-only tool result by call_id when previous_response_id is missing', async () => {
+    received.length = 0;
+
+    // Turn 1 caches a conversation whose assistant message holds call_t1.
+    await responses2({
+      model: 'rec-model',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: '!tool get_weather' }] }],
+      tools: [{ type: 'function', name: 'get_weather', description: 'Fetch weather' }],
+      tool_choice: 'auto',
+    });
+
+    // Turn 2: NO previous_response_id (the client lost it), just the orphaned
+    // tool result. The bridge must find call_t1 in the cache and expand.
+    const turn2 = await responses2({
+      model: 'rec-model',
+      input: [{ type: 'function_call_output', call_id: 'call_t1', output: '{"temp": 21}' }],
+    });
+    expect(turn2.status).toBe(200);
+    const params = received[1]!.params;
+    expect(params.previousResponseId).toBeUndefined();
+    expect(params.messages).toEqual([
+      { role: 'user', content: '!tool get_weather' },
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'call_t1', name: 'get_weather', arguments: { city: 'SF' } }],
+      },
+      { role: 'tool', content: '{"temp": 21}', toolCallId: 'call_t1' },
+    ]);
+  });
+
   it('keeps the stateless path unchanged when previous_response_id is absent', async () => {
     received.length = 0;
     const res = await responses2({
       model: 'rec-model',
-      input: [{ type: 'function_call_output', call_id: 'call_t1', output: '{"temp": 21}' }],
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'plain question' }] }],
     });
     expect(res.status).toBe(200);
     expect(received[0]!.params.previousResponseId).toBeUndefined();
-    expect(received[0]!.params.messages).toEqual([]);
+    expect(received[0]!.params.messages).toEqual([{ role: 'user', content: 'plain question' }]);
   });
 });
 

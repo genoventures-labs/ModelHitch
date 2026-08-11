@@ -30,9 +30,11 @@ import {
   resolveConversation,
   toResponsesCompletion,
   toResponsesStreamEvents,
+  toolMessagesFromOutputs,
+  toolOutputsFromInput,
   type ResponsesRequest,
 } from './responses.js';
-import { clearConversations, rememberConversation } from './conversation-state.js';
+import { clearConversations, findConversationWithToolCall, rememberConversation } from './conversation-state.js';
 import { normalizeBodyImages } from './local-images.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 
@@ -412,7 +414,29 @@ export class OpenAICompatibleServer {
     // them via previous_response_id. The bridge holds the state (zen rejects
     // the field outright) — expand the delta against the cache and forward
     // the FULL conversation stateless.
+    if (process.env.MODELHITCH_DEBUG === '1') this.log(`<- POST /v1/responses ${JSON.stringify(body)}`);
     params.messages = resolveConversation(params, body.previous_response_id);
+
+    // Never forward an unanswerable input: if the delta can't be resolved
+    // against the cache (previous_response_id lost/missing), try re-anchoring
+    // the tool results by their call ids — the function_call they answer may
+    // still be cached. Only if nothing resolves do we fail, with a clear
+    // message instead of the upstream provider's opaque 400.
+    const hasRealContent = params.messages.some((m) => m.role !== 'tool');
+    if (!hasRealContent) {
+      const outputs = toolOutputsFromInput(body.input);
+      const prior = outputs.length > 0 ? findConversationWithToolCall(new Set(outputs.map((o) => o.callId))) : undefined;
+      if (prior) {
+        this.log(`  ~~ re-anchored delta by call_id (${outputs.map((o) => o.callId).join(', ')})`);
+        params.messages = [...prior, ...toolMessagesFromOutputs(outputs)];
+      } else {
+        throw new ModelHitchError(
+          'bad-request',
+          'This request contains only tool results whose conversation state is unavailable (bridge restarted or cache evicted). Start a new chat.',
+          { status: 400 },
+        );
+      }
+    }
     params.previousResponseId = undefined;
 
     if (body.stream === true) {

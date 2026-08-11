@@ -5,10 +5,13 @@ import {
   resolveConversation,
   responsesInputToMessages,
   toResponsesCompletion,
+  toolMessagesFromOutputs,
+  toolOutputsFromInput,
 } from '../src/server/responses.js';
 import {
   clearConversations,
   conversationCount,
+  findConversationWithToolCall,
   rememberConversation,
 } from '../src/server/conversation-state.js';
 
@@ -342,7 +345,24 @@ describe('resolveConversation — bridge-side conversation reconstruction', () =
     ]);
   });
 
-  it('throws a clear bad-request when the referenced conversation is gone', () => {
+  it('forwards a full request stateless when the referenced conversation is gone', () => {
+    // Cache miss + the request itself is answerable -> forward as-is (losing
+    // history is better than failing the turn).
+    const params = mapResponsesRequest(
+      {
+        model: 'mock-model',
+        previous_response_id: 'resp_lost',
+        input: [{ role: 'user', content: 'what is 2+2?' }],
+      },
+      'mock-model',
+    );
+    expect(resolveConversation(params, 'resp_lost')).toEqual([{ role: 'user', content: 'what is 2+2?' }]);
+  });
+
+  it('leaves a delta unresolved (kept tool message) when the conversation is gone', () => {
+    // Cache miss: the mapped delta is returned as-is. The bridge then guards
+    // on it (tool-message-only input is unanswerable) and re-anchors it by
+    // call id or fails with a clear error.
     const params = mapResponsesRequest(
       {
         model: 'mock-model',
@@ -351,7 +371,45 @@ describe('resolveConversation — bridge-side conversation reconstruction', () =
       },
       'mock-model',
     );
-    expect(() => resolveConversation(params, 'resp_lost')).toThrow(/Start a new chat/);
+    expect(resolveConversation(params, 'resp_lost')).toEqual([{ role: 'tool', content: '42', toolCallId: 'call_1' }]);
+  });
+});
+
+describe('tool-output helpers (call-id re-anchoring)', () => {
+  beforeEach(() => clearConversations());
+  afterEach(() => clearConversations());
+
+  it('extracts call_id + serialized output from function_call_output items', () => {
+    const outputs = toolOutputsFromInput([
+      { type: 'function_call_output', call_id: 'call_1', output: '{"temp": 21}' },
+      { type: 'function_call_output', call_id: 'call_2', output: [{ type: 'output_text', text: 'parts result' }] },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+      { type: 'function_call_output', output: 'no call id' },
+    ]);
+    expect(outputs).toEqual([
+      { callId: 'call_1', output: '{"temp": 21}' },
+      { callId: 'call_2', output: 'parts result' },
+    ]);
+    expect(toolMessagesFromOutputs(outputs)).toEqual([
+      { role: 'tool', content: '{"temp": 21}', toolCallId: 'call_1' },
+      { role: 'tool', content: 'parts result', toolCallId: 'call_2' },
+    ]);
+  });
+
+  it('finds the most recent conversation whose assistant tool call matches', () => {
+    rememberConversation('resp_old', [
+      { role: 'user', content: 'older' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'call_old', name: 'x', arguments: {} }] },
+    ]);
+    rememberConversation('resp_new', [
+      { role: 'user', content: 'newer' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'call_new', name: 'y', arguments: {} }] },
+    ]);
+    expect(findConversationWithToolCall(new Set(['call_old']))).toEqual([
+      { role: 'user', content: 'older' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'call_old', name: 'x', arguments: {} }] },
+    ]);
+    expect(findConversationWithToolCall(new Set(['call_ghost']))).toBeUndefined();
   });
 });
 
