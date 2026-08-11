@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mimeFromPath, normalizeBodyImages, resolveLocalImageUrl } from '../src/server/local-images.js';
+import {
+  MAX_INLINE_IMAGE_BYTES,
+  mimeFromPath,
+  normalizeBodyImages,
+  resolveLocalImageUrl,
+} from '../src/server/local-images.js';
 
 // 1x1 red pixel PNG.
 const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
@@ -71,6 +76,71 @@ describe('resolveLocalImageUrl', () => {
     expect(await resolveLocalImageUrl('')).toBeUndefined();
     expect(await resolveLocalImageUrl(undefined)).toBeUndefined();
     expect(await resolveLocalImageUrl('ftp://host/x.png')).toBeUndefined();
+    expect(await resolveLocalImageUrl('blob:https://host/x.png')).toBeUndefined();
+  });
+});
+
+describe('resolveLocalImageUrl — security gates', () => {
+  it('REFUSES to inline a non-image file renamed to .png (no extension trust)', async () => {
+    // The smuggling case: a real SSH key (or anything) named key.png.
+    const keyPath = path.join(dir, 'key.png');
+    writeFileSync(keyPath, '-----BEGIN OPENSSH PRIVATE KEY-----\nabcdefghijklmnop\n-----END OPENSSH PRIVATE KEY-----\n');
+    expect(await resolveLocalImageUrl(fileUri(keyPath))).toBeUndefined();
+  });
+
+  it('REFUSES when bytes do not match the extension (PNG bytes in a .txt)', async () => {
+    const txtPath = path.join(dir, 'stealth.txt');
+    writeFileSync(txtPath, PNG_BYTES);
+    expect(await resolveLocalImageUrl(fileUri(txtPath))).toBeUndefined();
+  });
+
+  it('REFUSES when bytes do not match the extension (PNG bytes in a .jpg)', async () => {
+    const jpgPath = path.join(dir, 'mismatch.jpg');
+    writeFileSync(jpgPath, PNG_BYTES);
+    expect(await resolveLocalImageUrl(fileUri(jpgPath))).toBeUndefined();
+  });
+
+  it('REFUSES files over the per-image size cap', async () => {
+    const bigPath = path.join(dir, 'big.png');
+    writeFileSync(bigPath, PNG_BYTES);
+    expect(await resolveLocalImageUrl(fileUri(bigPath), { maxBytes: 10 })).toBeUndefined();
+    // Default cap still allows it.
+    expect(await resolveLocalImageUrl(fileUri(bigPath))).toBe(`data:image/png;base64,${PNG_B64}`);
+  });
+
+  it('REFUSES empty files', async () => {
+    const emptyPath = path.join(dir, 'empty.png');
+    writeFileSync(emptyPath, '');
+    expect(await resolveLocalImageUrl(fileUri(emptyPath))).toBeUndefined();
+  });
+
+  it('REFUSES non-file paths (directories)', async () => {
+    expect(await resolveLocalImageUrl(fileUri(dir))).toBeUndefined();
+  });
+
+  it('REFUSES vscode-resource:// URIs whose authority is not "file"', async () => {
+    const slash = pngPath.replace(/\\/g, '/');
+    const remote = `vscode-resource://ssh-remote+mybox${slash.startsWith('/') ? '' : '/'}${slash}`;
+    const webview = `vscode-resource://a1b2c3d4e5f6${slash.startsWith('/') ? '' : '/'}${slash}`;
+    expect(await resolveLocalImageUrl(remote)).toBeUndefined();
+    expect(await resolveLocalImageUrl(webview)).toBeUndefined();
+  });
+
+  it('REFUSES file:// URIs with a non-"file" authority (file://c:/… form)', async () => {
+    const slash = pngPath.replace(/\\/g, '/');
+    // file://c:/… — authority "c:" — was accepted by the old matcher.
+    expect(await resolveLocalImageUrl(`file://${slash.replace(/^\//, '')}`)).toBeUndefined();
+  });
+
+  it('REFUSES malformed percent-encoding', async () => {
+    expect(await resolveLocalImageUrl(`file:///${dir.replace(/\\/g, '/')}/%zz.png`)).toBeUndefined();
+  });
+
+  it('sniffs real image bytes — SVG content resolves as image/svg+xml', async () => {
+    const svgPath = path.join(dir, 'diagram.svg');
+    writeFileSync(svgPath, '<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>');
+    const out = await resolveLocalImageUrl(fileUri(svgPath));
+    expect(out).toBe(`data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>').toString('base64')}`);
   });
 });
 
@@ -149,6 +219,19 @@ describe('normalizeBodyImages', () => {
     };
     const snapshot = JSON.stringify(body);
     await normalizeBodyImages(body);
+    expect(JSON.stringify(body)).toBe(snapshot);
+  });
+
+  it('does not read smuggled non-image files during the full walk', async () => {
+    const keyPath = path.join(dir, 'key.png');
+    writeFileSync(keyPath, '-----BEGIN OPENSSH PRIVATE KEY-----\nabcdefghijklmnop\n-----END OPENSSH PRIVATE KEY-----\n');
+    const body = {
+      model: 'm',
+      input: [{ role: 'user', content: [{ type: 'input_image', image_url: { url: fileUri(keyPath) } }] }],
+    };
+    const snapshot = JSON.stringify(body);
+    await normalizeBodyImages(body);
+    // URL left exactly as the client sent it — never base64'd.
     expect(JSON.stringify(body)).toBe(snapshot);
   });
 });
