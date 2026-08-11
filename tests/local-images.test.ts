@@ -173,6 +173,33 @@ describe('normalizeBodyImages', () => {
     expect((part[0]!.image_url as { url: string }).url).toBe(`data:image/png;base64,${PNG_B64}`);
   });
 
+  it('inlines a bare STRING image_url (VS Code extension Responses builder shape)', async () => {
+    // The extension emits `image_url: imageUrl.url` — a plain string, not the
+    // spec's `{ url }` object. v0.5.2's inlining missed this shape, so local
+    // screenshots kept flowing through un-inlined and upstream rejected them
+    // with an opaque 400.
+    const body = {
+      model: 'm',
+      input: [{ role: 'user', content: [{ type: 'input_image', detail: 'auto', image_url: vsResourceUri(pngPath) }] }],
+    };
+    await normalizeBodyImages(body);
+    const part = (body.input as Array<Record<string, unknown>>)[0]!.content as Array<Record<string, unknown>>;
+    expect(part[0]!.image_url).toBe(`data:image/png;base64,${PNG_B64}`);
+  });
+
+  it('leaves a bare STRING image_url that fails the security gates untouched', async () => {
+    const badPath = path.join(dir, 'secret.png');
+    writeFileSync(badPath, '-----BEGIN OPENSSH PRIVATE KEY-----\nabcdefghijklmnop\n-----END OPENSSH PRIVATE KEY-----\n');
+    const body = {
+      model: 'm',
+      input: [{ role: 'user', content: [{ type: 'input_image', image_url: fileUri(badPath) }] }],
+    };
+    const snapshot = JSON.stringify(body);
+    await normalizeBodyImages(body);
+    // Fail closed: the URL stays exactly as the client sent it.
+    expect(JSON.stringify(body)).toBe(snapshot);
+  });
+
   it('converts Anthropic source url → base64 block', async () => {
     const body = {
       model: 'm',

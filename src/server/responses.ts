@@ -63,17 +63,27 @@ export interface ResponsesRequest {
 // Inbound: Responses request -> normalized ChatParams
 // ---------------------------------------------------------------------------
 
-/** Convert a Responses content part into normalized text/content. */
-function partToContent(part: Record<string, unknown>, text: string): string | ContentPart[] {
+/**
+ * Convert a Responses content part into normalized content parts.
+ *
+ * `image_url` arrives in BOTH shapes in the wild: the Responses spec's
+ * `{ type: 'input_image', image_url: { url, detail } }` object, and the
+ * VS Code Copilot extension's BYOK custom-endpoint builder, which sends the
+ * bare URL *string* (`image_url: imageUrl.url`). Handle both so images aren't
+ * silently dropped (a dropped image leaves empty user content, which upstream
+ * providers reject with "Input must have at least 1 token.").
+ */
+function partToContent(part: Record<string, unknown>, text: string): ContentPart[] {
   const parts: ContentPart[] = [];
   if (text) parts.push({ type: 'text', text });
   if (part.type === 'input_image') {
-    const url = String((part.image_url as Record<string, unknown> | undefined)?.url ?? '');
+    const raw = part.image_url;
+    const url = typeof raw === 'string' ? raw : String((raw as Record<string, unknown> | undefined)?.url ?? '');
     const m = /^data:([^;,]+);base64,(.+)$/s.exec(url);
     if (m) parts.push({ type: 'image-data', mimeType: m[1]!, data: m[2]! });
     else if (url) parts.push({ type: 'image', imageUrl: url });
   }
-  return parts.length ? parts : '';
+  return parts;
 }
 
 /** Extract text (and any images) from a Responses message item's content. */
@@ -92,9 +102,15 @@ function itemContent(item: Record<string, unknown>): string | ContentPart[] {
         text += String(part.text ?? '');
         break;
       case 'input_image': {
-        const mapped = partToContent(part, text);
-        text = '';
-        if (Array.isArray(mapped)) parts.push(...mapped);
+        const mapped = partToContent(part, '');
+        if (mapped.length) {
+          // Image mapped — flush accumulated text as a part before it.
+          if (text) parts.push({ type: 'text', text });
+          text = '';
+          parts.push(...mapped);
+        }
+        // No usable image URL — keep the accumulated text instead of
+        // discarding it.
         break;
       }
     }
@@ -123,6 +139,14 @@ export function responsesInputToMessages(input: unknown[] | undefined): ModelMes
     }
   };
 
+  // Collect call_ids of top-level function_call items in THIS request so we
+  // can drop orphaned function_call_output items (see below).
+  const callIds = new Set<string>();
+  for (const raw of input ?? []) {
+    const item = raw as Record<string, unknown>;
+    if (item.type === 'function_call') callIds.add(String(item.call_id ?? item.id ?? ''));
+  }
+
   for (const raw of input ?? []) {
     const item = raw as Record<string, unknown>;
     if (item.type === 'function_call') {
@@ -137,24 +161,54 @@ export function responsesInputToMessages(input: unknown[] | undefined): ModelMes
     }
     flush();
     if (item.type === 'function_call_output') {
+      const callId = String(item.call_id ?? '');
+      // Stateful Responses requests (VS Code Copilot extension) slice prior
+      // turns and reference them via previous_response_id — which the bridge
+      // drops. A function_call_output whose function_call lives in an earlier
+      // request (or that has no call_id at all) would otherwise be forwarded
+      // as an orphaned tool message and rejected upstream with an opaque 400.
+      // Drop it: the bridge conversion is stateless, so that context was
+      // never forwarded anyway.
+      if (!callId || !callIds.has(callId)) continue;
       const output = item.output;
-      out.push({
-        role: 'tool',
-        content: typeof output === 'string' ? output : JSON.stringify(output ?? ''),
-        toolCallId: String(item.call_id ?? ''),
-      });
+      let content: string;
+      if (typeof output === 'string') content = output;
+      else if (Array.isArray(output)) {
+        // The extension emits output as a parts array when prompt-cache
+        // breakpoints are enabled — serialize only the text-bearing parts.
+        content = output
+          .map((p) => ((p as Record<string, unknown>).type === 'output_text' ? String((p as Record<string, unknown>).text ?? '') : ''))
+          .join('');
+      } else {
+        content = JSON.stringify(output ?? '');
+      }
+      out.push({ role: 'tool', content, toolCallId: callId });
       continue;
     }
     // Reasoning summaries carry no instruction for the model — drop them.
     if (item.type === 'reasoning') continue;
 
-    const role = String(item.role ?? 'user');
+    const role = String(item.role ?? '');
+    // Items without a chat role (tool_search_call, tool_search_output, custom
+    // vendor items, …) are not messages — skip them rather than emitting an
+    // empty user message that upstream providers reject.
+    if (!['system', 'assistant', 'user', 'tool'].includes(role)) continue;
     const content = itemContent(item);
     if (role === 'system') out.push({ role: 'system', content });
-    else if (role === 'assistant') out.push({ role: 'assistant', content });
+    else if (role === 'assistant') {
+      // Assistant message with no text and no tool calls is meaningless.
+      if (!content) continue;
+      out.push({ role: 'assistant', content });
+    }
     // The normalized `tool` message carries plain text only.
     else if (role === 'tool') out.push({ role: 'tool', content: serializeText(content), toolCallId: String(item.tool_call_id ?? '') });
-    else out.push({ role: 'user', content });
+    else {
+      // Empty user message carries no instruction — drop it too (an
+      // all-image message whose image failed to map is better skipped than
+      // sent as an empty turn).
+      if (!content) continue;
+      out.push({ role: 'user', content });
+    }
   }
   flush();
   return out;

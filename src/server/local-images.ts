@@ -168,9 +168,16 @@ async function walk(node: unknown, opts?: InlineImageOptions): Promise<void> {
   if (!node || typeof node !== 'object') return;
   const obj = node as AnyObj;
 
-  // OpenAI-style image_url { url } — also responses input_image.
+  // OpenAI-style image_url — BOTH shapes: the spec's { url } object and the
+  // VS Code Copilot extension's bare URL string (its Responses request
+  // builder emits `image_url: imageUrl.url`). The string form is exactly what
+  // v0.5.2's inlining missed, so `vscode-resource://` screenshots kept
+  // flowing through to the upstream and surfaced as an opaque 400.
   const iu = obj.image_url;
-  if (iu && typeof iu === 'object') {
+  if (typeof iu === 'string') {
+    const resolved = await resolveLocalImageUrl(iu, opts);
+    if (resolved) obj.image_url = resolved;
+  } else if (iu && typeof iu === 'object') {
     const iuObj = iu as AnyObj;
     if (typeof iuObj.url === 'string') {
       const resolved = await resolveLocalImageUrl(iuObj.url, opts);

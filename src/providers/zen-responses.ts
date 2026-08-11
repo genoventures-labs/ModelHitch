@@ -259,12 +259,25 @@ export class ZenResponsesProvider implements Provider {
     return body;
   }
 
+  /**
+   * Opt-in request/response forensics: with MODELHITCH_DEBUG=1 the bridge
+   * logs the exact body it forwards to the provider plus the FULL upstream
+   * error body on failures. This is how opaque upstream 400s ("Provider
+   * returned error") get diagnosed — the client-facing error is truncated,
+   * but the debug log is not.
+   */
+  private debugLog(...args: unknown[]): void {
+    const enabled = (typeof process !== 'undefined' && process.env?.MODELHITCH_DEBUG === '1') || false;
+    if (enabled) console.log(`[modelhitch:${this.id}]`, ...args);
+  }
+
   private async request(
     params: ChatParams,
     credentials: ProviderCredentials,
     body: Record<string, unknown>,
   ): Promise<Response> {
     const apiKey = this.resolveApiKey(credentials);
+    this.debugLog('-> POST', `${this.baseUrl}/responses`, JSON.stringify(body));
     try {
       return await this.fetchImpl(`${this.baseUrl}/responses`, {
         method: 'POST',
@@ -287,7 +300,10 @@ export class ZenResponsesProvider implements Provider {
   async chat(params: ChatParams, credentials: ProviderCredentials): Promise<ChatResult> {
     const res = await this.request(params, credentials, this.buildBody(params, false));
     const text = await res.text();
-    if (!res.ok) throw mapHTTPError(res.status, this.id, text);
+    if (!res.ok) {
+      this.debugLog('<- HTTP', res.status, text);
+      throw mapHTTPError(res.status, this.id, text);
+    }
     const data = safeJsonParse<ResponsesBody>(text, {});
     const { content, toolCalls } = fromOutput(data.output);
     const message: ModelMessage =
@@ -306,6 +322,7 @@ export class ZenResponsesProvider implements Provider {
     const res = await this.request(params, credentials, this.buildBody(params, true));
     if (!res.ok) {
       const text = await res.text();
+      this.debugLog('<- HTTP', res.status, text);
       throw mapHTTPError(res.status, this.id, text);
     }
     const body = requireBody(res, this.id);

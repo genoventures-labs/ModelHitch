@@ -194,3 +194,62 @@ describe('bridge POST /v1/responses — model routing', () => {
     expect(body.model).toBe('mock-model');
   });
 });
+
+describe('bridge POST /v1/responses — extension-shaped requests', () => {
+  it('accepts an input_image with a STRING image_url alongside text', async () => {
+    const res = await responses({
+      model: 'mock-model',
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'what is in this screenshot?' },
+            { type: 'input_image', detail: 'auto', image_url: 'data:image/png;base64,iVBORw0KGgo=' },
+          ],
+        },
+      ],
+    });
+    // The mixed text+image item must map and flow through — previously the
+    // string image_url was dropped, and text-only items with an unusable
+    // image could collapse into an empty user turn (upstream 400).
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.object).toBe('response');
+    expect(body.status).toBe('completed');
+  });
+
+  it('accepts tool_search_output / tool_search_call items (no empty turns)', async () => {
+    const res = await responses({
+      model: 'mock-model',
+      input: [
+        {
+          type: 'tool_search_output',
+          execution: 'client',
+          call_id: 'toolu_search_1',
+          status: 'completed',
+          tools: [{ type: 'function', name: 'get_weather' }],
+        },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'ok done' }] },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    const text = body.output
+      .filter((o: any) => o.type === 'message')
+      .map((o: any) => o.content.map((c: any) => c.text ?? '').join(''))
+      .join('');
+    expect(text).toContain('Mock reply: ok done');
+  });
+
+  it('accepts an orphaned function_call_output without failing', async () => {
+    const res = await responses({
+      model: 'mock-model',
+      input: [
+        { type: 'function_call_output', call_id: 'call_from_earlier', output: '42' },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue' }] },
+      ],
+    });
+    expect(res.status).toBe(200);
+  });
+});

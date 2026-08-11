@@ -373,6 +373,15 @@ Request bodies are capped at **64 MiB** by default (room for inline base64 image
 attaches them as `image_url` data URIs). Tune via the `maxBodyBytes` option, or
 `MODELHITCH_MAX_BODY_BYTES` when running `npm run bridge`.
 
+Local image URLs (`file://`, `vscode-resource://file/…`) in inbound requests are inlined to
+base64 data URIs before forwarding — both the spec's `image_url: { url }` object form and the
+bare **string** form the VS Code Copilot extension emits. Anything failing the security gates
+(wrong scheme/authority, >20 MiB, extension/MIME mismatch) is left untouched for upstream.
+
+For opaque upstream failures, set `MODELHITCH_DEBUG=1` when starting the bridge: the zen
+provider logs the exact forwarded `/responses` body and the **full** upstream error body
+(which error mapping otherwise truncates at 300 chars).
+
 Endpoints: `POST /v1/chat/completions` (stream + non-stream), `POST /v1/responses` (stream +
 non-stream — Codex CLI / Responses-API clients), `POST /v1/messages` (stream + non-stream —
 Claude Code / Anthropic-format gateways, plus `POST /v1/messages/count_tokens`), `GET
