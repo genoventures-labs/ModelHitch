@@ -25,6 +25,7 @@ import {
   type GeminiRequest,
 } from './gemini-wire.js';
 import { mapResponsesRequest, toResponsesCompletion, toResponsesStreamEvents, type ResponsesRequest } from './responses.js';
+import { normalizeBodyImages } from './local-images.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 
 export interface ModelHitchServerOptions {
@@ -707,7 +708,13 @@ export class OpenAICompatibleServer {
         const text = Buffer.concat(chunks).toString('utf8');
         if (!text.trim()) return resolve({});
         try {
-          resolve(JSON.parse(text));
+          const parsed = JSON.parse(text) as unknown;
+          // Inline local image files (file://, vscode-resource:// URIs) so the
+          // upstream never has to fetch client-local URLs — otherwise those
+          // come back as opaque upstream 400s. Data/http(s) URLs are untouched.
+          normalizeBodyImages(parsed)
+            .then(() => resolve(parsed))
+            .catch((err) => reject(err));
         } catch {
           reject(new ModelHitchError('bad-request', 'Request body is not valid JSON.', { status: 400 }));
         }
