@@ -1,6 +1,6 @@
 {
   "name": "modelhitch",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Plug-and-play BYOK integration layer — hitch any AI provider or model to your app.",
   "type": "module",
   "main": "./dist/index.cjs",
