@@ -11,6 +11,31 @@ export { LocalStorageKeyStore } from './storage/local-storage.js';
 export { OpenAICompatibleServer, createModelHitchServer } from './server/server.js';
 export type { ModelHitchServerOptions } from './server/server.js';
 
+// auto-mode: rate-limit failover + usage tracking
+export {
+  DEFAULT_FAILOVER_LANES,
+  DEFAULT_RETRYABLE_CODES,
+  errorInfo,
+  isRetryableError,
+  isCredentialError,
+  resolveLanes,
+  retryableCodesFor,
+  maxAttemptsFor,
+  withFailover,
+  withFailoverStream,
+  type AutoModeOptions,
+  type FailoverEvent,
+  type FailoverTarget,
+  type FailoverErrorInfo,
+} from './core/failover.js';
+export { UsageTracker, usageDashboardHtml } from './core/usage.js';
+export type {
+  UsageEvent,
+  UsageSnapshot,
+  UsageTotals,
+  UsageWindow,
+} from './core/usage.js';
+
 export {
   // Provider framework
   createOpenAICompatibleProvider,

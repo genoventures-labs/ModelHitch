@@ -7,6 +7,17 @@ import type { KeyStore } from '../core/keystore.js';
 import type { ChatParams, ProviderCredentials, StreamChunk, Usage } from '../core/types.js';
 import { defaultProviders } from '../registry.js';
 import type { Provider } from '../providers/types.js';
+import {
+  resolveLanes,
+  retryableCodesFor,
+  maxAttemptsFor,
+  withFailover,
+  withFailoverStream,
+  type AutoModeOptions,
+  type FailoverEvent,
+  type FailoverTarget,
+} from '../core/failover.js';
+import { UsageTracker, usageDashboardHtml, type UsageEvent } from '../core/usage.js';
 import { mapFinishReasonOpenAI, mapRequest, routeModel, toChatCompletion, toOpenAIError, toUsageOutput } from './mapping.js';
 import {
   estimateAnthropicInputTokens,
@@ -68,30 +79,32 @@ export interface ModelHitchServerOptions {
    * per-user metering, or rate-limit accounting.
    */
   onUsage?: (event: UsageEvent) => void;
+  /**
+   * auto-mode: transparent failover to fallback lanes when the primary lane
+   * errors (429 rate limits, 5xx, network blips). `true` uses the default
+   * lineup (cheap Go model, then free Zen models); pass `AutoModeOptions` for
+   * custom lanes/models. Applies to every wire, stream and non-stream.
+   */
+  autoMode?: AutoModeOptions | boolean;
+  /** Called each time auto-mode switches lanes. */
+  onFailover?: (event: FailoverEvent) => void;
+  /**
+   * Usage tracker backing `GET /v1/usage` and `GET /usage`. Defaults to an
+   * internal in-memory tracker.
+   */
+  usageTracker?: UsageTracker;
 }
 
 /** One completed inference request, as reported to the `onUsage` hook. */
-export interface UsageEvent {
-  /** Provider id, e.g. "opencode-zen". */
-  providerId: string;
-  /** Routed model id. */
-  model: string;
-  /** Wire that served the request: chat-completions | responses | messages | gemini. */
-  wire: string;
-  /** True when the client requested SSE streaming. */
-  streamed: boolean;
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  /** Estimated USD (best-effort list pricing; 0 for free/unknown). */
-  costUsd: number;
-  /** Wall time from request start to completion, ms. */
-  latencyMs: number;
-  /** ISO timestamp. */
-  at: string;
-}
+export type { UsageEvent } from '../core/usage.js';
 
 const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024; // images arrive as inline base64 — 10 MiB was too small
+
+/** A routable lane: provider + model + the credentials to call it with. */
+interface ResolvedLane extends FailoverTarget {
+  provider: Provider;
+  credentials: ProviderCredentials;
+}
 
 /**
  * A local, OpenAI-compatible HTTP server in front of the ModelHitch harness.
@@ -121,10 +134,12 @@ export class OpenAICompatibleServer {
   readonly providers: Provider[];
   readonly options: ModelHitchServerOptions;
   private httpServer: Server | null = null;
+  private usageTracker: UsageTracker;
 
   constructor(options: ModelHitchServerOptions = {}) {
     this.options = options;
     this.providers = options.providers ?? defaultProviders;
+    this.usageTracker = options.usageTracker ?? new UsageTracker();
   }
 
   /** Start listening. `port` defaults to 0 (ephemeral). */
@@ -228,6 +243,28 @@ export class OpenAICompatibleServer {
       return;
     }
 
+    // Usage telemetry: JSON snapshot + a self-contained HTML dashboard.
+    if (method === 'GET' && path === '/v1/usage') {
+      this.log(`${method} ${path} ->`);
+      this.sendJson(res, 200, this.usageTracker.snapshot());
+      return;
+    }
+
+    if (method === 'POST' && path === '/v1/usage/reset') {
+      this.log(`${method} ${path} ->`);
+      this.usageTracker.reset();
+      this.sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (method === 'GET' && path === '/usage') {
+      this.log(`${method} ${path} ->`);
+      this.cors(res);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(usageDashboardHtml());
+      return;
+    }
+
     // Gemini CLI / Google-native clients. Gemini CLI sends model ids in the
     // *path* (`/v1beta/models/{model}:generateContent`), so the capture is
     // `[^:]+` — `provider/model` prefixes survive for explicit routing.
@@ -285,12 +322,25 @@ export class OpenAICompatibleServer {
 
     this.log(`  -> ${provider.id}/${model}`);
     const startedAt = Date.now();
-    const result = await provider.chat(params, credentials);
-    this.reportUsage({ providerId: provider.id, model, wire: 'chat-completions', streamed: false }, result.usage, startedAt);
+    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
+    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const { value: result, target } = await this.withFailover(targets, (lane) =>
+      lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+    );
+    this.reportUsage(
+      { providerId: target.provider.id, model: target.model, wire: 'chat-completions', streamed: false },
+      result.usage,
+      startedAt,
+    );
     this.sendJson(res, 200, toChatCompletion(result, model));
   }
 
-  /** Stream a normalized provider stream out as OpenAI SSE chunks. */
+  /**
+   * Stream a normalized provider stream out as OpenAI SSE chunks. The first
+   * chunk is fetched BEFORE the HTTP 200 is committed, so an upstream 429
+   * (or an exhausted auto-mode lane chain) surfaces as a real error status
+   * instead of a 200 followed by an SSE error event.
+   */
   private async writeStream(
     res: ServerResponse,
     provider: Provider,
@@ -304,16 +354,50 @@ export class OpenAICompatibleServer {
     const chunkBase = { id, object: 'chat.completion.chunk' as const, created, model };
     const startedAt = Date.now();
 
+    // Abort the upstream call if the client disconnects mid-stream (registered
+    // before the header peek so a disconnect during it also aborts upstream).
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+
+    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
+    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const usageInfo = { providerId: provider.id, model, wire: 'chat-completions' as const, streamed: true };
+    const opts = this.options.autoMode;
+    const stream = this.trackStream(
+      withFailoverStream(
+        targets,
+        (lane) =>
+          lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
+        {
+          codes: retryableCodesFor(opts),
+          maxAttempts: maxAttemptsFor(opts, Math.max(targets.length - 1, 0)),
+          onFailover: (event) => {
+            usageInfo.providerId = event.to.providerId;
+            usageInfo.model = event.to.model;
+            this.emitFailover(event);
+          },
+        },
+      ),
+      usageInfo,
+      startedAt,
+    );
+
+    const iterator = stream[Symbol.asyncIterator]();
+    let first: IteratorResult<StreamChunk>;
+    try {
+      first = await iterator.next();
+    } catch (err) {
+      if (res.destroyed || res.writableEnded) return;
+      this.sendError(res, err);
+      return;
+    }
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
-    });
-
-    // Abort the upstream call if the client disconnects mid-stream.
-    res.on('close', () => {
-      if (!res.writableEnded) controller.abort();
     });
 
     const toolIndex = new Map<string, number>();
@@ -323,61 +407,60 @@ export class OpenAICompatibleServer {
     const write = (chunk: OpenAIStreamChunk) => {
       res.write(`data: ${JSON.stringify(chunk)}\n\n`);
     };
+    const consume = (event: StreamChunk) => {
+      switch (event.type) {
+        case 'text-delta': {
+          const delta: Record<string, unknown> = { content: event.text };
+          if (!started) {
+            delta.role = 'assistant';
+            started = true;
+          }
+          write({ ...chunkBase, choices: [{ index: 0, delta, finish_reason: null }] });
+          break;
+        }
+        case 'tool-call-start': {
+          const index = nextToolIndex++;
+          toolIndex.set(event.id, index);
+          const delta = {
+            role: 'assistant',
+            tool_calls: [
+              {
+                index,
+                id: event.id,
+                type: 'function',
+                function: { name: event.name, arguments: '' },
+                ...(event.thoughtSignature ? { thoughtSignature: event.thoughtSignature } : {}),
+              },
+            ],
+          };
+          write({ ...chunkBase, choices: [{ index: 0, delta, finish_reason: null }] });
+          break;
+        }
+        case 'tool-call-args-delta': {
+          const index = toolIndex.get(event.id) ?? 0;
+          const delta = { tool_calls: [{ index, function: { arguments: event.argsDelta } }] };
+          write({ ...chunkBase, choices: [{ index: 0, delta, finish_reason: null }] });
+          break;
+        }
+        case 'tool-call-end':
+          // The final finish chunk carries the resolved finish_reason.
+          break;
+        case 'finish': {
+          const finish: OpenAIStreamChunk = {
+            ...chunkBase,
+            choices: [{ index: 0, delta: {}, finish_reason: mapFinishReasonOpenAI(event.finishReason) }],
+          };
+          if (event.usage) finish.usage = toUsageOutput(event.usage) ?? undefined;
+          write(finish);
+          break;
+        }
+      }
+    };
 
     try {
-      const stream = this.trackStream(
-        provider.stream({ ...params, signal: controller.signal }, credentials),
-        { providerId: provider.id, model, wire: 'chat-completions', streamed: true },
-        startedAt,
-      );
-      for await (const event of stream) {
-        switch (event.type) {
-          case 'text-delta': {
-            const delta: Record<string, unknown> = { content: event.text };
-            if (!started) {
-              delta.role = 'assistant';
-              started = true;
-            }
-            write({ ...chunkBase, choices: [{ index: 0, delta, finish_reason: null }] });
-            break;
-          }
-          case 'tool-call-start': {
-            const index = nextToolIndex++;
-            toolIndex.set(event.id, index);
-            const delta = {
-              role: 'assistant',
-              tool_calls: [
-                {
-                  index,
-                  id: event.id,
-                  type: 'function',
-                  function: { name: event.name, arguments: '' },
-                  ...(event.thoughtSignature ? { thoughtSignature: event.thoughtSignature } : {}),
-                },
-              ],
-            };
-            write({ ...chunkBase, choices: [{ index: 0, delta, finish_reason: null }] });
-            break;
-          }
-          case 'tool-call-args-delta': {
-            const index = toolIndex.get(event.id) ?? 0;
-            const delta = { tool_calls: [{ index, function: { arguments: event.argsDelta } }] };
-            write({ ...chunkBase, choices: [{ index: 0, delta, finish_reason: null }] });
-            break;
-          }
-          case 'tool-call-end':
-            // The final finish chunk carries the resolved finish_reason.
-            break;
-          case 'finish': {
-            const finish: OpenAIStreamChunk = {
-              ...chunkBase,
-              choices: [{ index: 0, delta: {}, finish_reason: mapFinishReasonOpenAI(event.finishReason) }],
-            };
-            if (event.usage) finish.usage = toUsageOutput(event.usage) ?? undefined;
-            write(finish);
-            break;
-          }
-        }
+      if (!first.done) consume(first.value);
+      for await (const event of { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<StreamChunk>) {
+        consume(event);
       }
       // Some providers end without an explicit finish chunk — synthesize one.
       write({ ...chunkBase, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
@@ -447,8 +530,16 @@ export class OpenAICompatibleServer {
 
     this.log(`  -> ${provider.id}/${model} (responses)`);
     const startedAt = Date.now();
-    const result = await provider.chat(params, credentials);
-    this.reportUsage({ providerId: provider.id, model, wire: 'responses', streamed: false }, result.usage, startedAt);
+    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
+    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const { value: result, target } = await this.withFailover(targets, (lane) =>
+      lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+    );
+    this.reportUsage(
+      { providerId: target.provider.id, model: target.model, wire: 'responses', streamed: false },
+      result.usage,
+      startedAt,
+    );
     const completion = toResponsesCompletion(result, model);
     this.sendJson(res, 200, completion);
     // Remember this turn so a follow-up previous_response_id can be resolved.
@@ -464,6 +555,52 @@ export class OpenAICompatibleServer {
     model: string,
   ): Promise<void> {
     const controller = new AbortController();
+    // Abort the upstream call if the client disconnects mid-stream.
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+
+    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
+    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const usageInfo = { providerId: provider.id, model, wire: 'responses' as const, streamed: true };
+    const opts = this.options.autoMode;
+    const stream = this.trackStream(
+      withFailoverStream(
+        targets,
+        (lane) =>
+          lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
+        {
+          codes: retryableCodesFor(opts),
+          maxAttempts: maxAttemptsFor(opts, Math.max(targets.length - 1, 0)),
+          onFailover: (event) => {
+            usageInfo.providerId = event.to.providerId;
+            usageInfo.model = event.to.model;
+            this.emitFailover(event);
+          },
+        },
+      ),
+      usageInfo,
+      Date.now(),
+    );
+    const mapped = toResponsesStreamEvents(stream, model, {
+      onCompleted: (responseId, assistantMessages) => {
+        rememberConversation(responseId, [...params.messages, ...assistantMessages]);
+      },
+    });
+
+    // Peek the first event before committing to HTTP 200.
+    const iterator = mapped[Symbol.asyncIterator]();
+    let first: IteratorResult<string>;
+    try {
+      first = await iterator.next();
+    } catch (err) {
+      if (res.destroyed || res.writableEnded) return;
+      const { status, body } = toOpenAIError(err);
+      this.log(`  !! ${provider.id} failed: HTTP ${status} ${body.error.code}`);
+      this.sendJson(res, status, body);
+      return;
+    }
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -471,22 +608,9 @@ export class OpenAICompatibleServer {
       'X-Accel-Buffering': 'no',
     });
 
-    // Abort the upstream call if the client disconnects mid-stream.
-    res.on('close', () => {
-      if (!res.writableEnded) controller.abort();
-    });
-
     try {
-      const stream = this.trackStream(
-        provider.stream({ ...params, signal: controller.signal }, credentials),
-        { providerId: provider.id, model, wire: 'responses', streamed: true },
-        Date.now(),
-      );
-      for await (const line of toResponsesStreamEvents(stream, model, {
-        onCompleted: (responseId, assistantMessages) => {
-          rememberConversation(responseId, [...params.messages, ...assistantMessages]);
-        },
-      })) {
+      if (!first.done) res.write(first.value);
+      for await (const line of { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<string>) {
         res.write(line);
       }
       res.end();
@@ -526,8 +650,16 @@ export class OpenAICompatibleServer {
 
     this.log(`  -> ${provider.id}/${model} (anthropic)`);
     const startedAt = Date.now();
-    const result = await provider.chat(params, credentials);
-    this.reportUsage({ providerId: provider.id, model, wire: 'messages', streamed: false }, result.usage, startedAt);
+    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
+    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const { value: result, target } = await this.withFailover(targets, (lane) =>
+      lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+    );
+    this.reportUsage(
+      { providerId: target.provider.id, model: target.model, wire: 'messages', streamed: false },
+      result.usage,
+      startedAt,
+    );
     this.sendJson(res, 200, toAnthropicCompletion(result, model, estimateAnthropicInputTokens(body)));
   }
 
@@ -541,16 +673,53 @@ export class OpenAICompatibleServer {
     body: AnthropicRequest,
   ): Promise<void> {
     const controller = new AbortController();
+    // Abort the upstream call if the client disconnects mid-stream.
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+
+    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
+    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const usageInfo = { providerId: provider.id, model, wire: 'messages' as const, streamed: true };
+    const opts = this.options.autoMode;
+    const stream = this.trackStream(
+      withFailoverStream(
+        targets,
+        (lane) =>
+          lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
+        {
+          codes: retryableCodesFor(opts),
+          maxAttempts: maxAttemptsFor(opts, Math.max(targets.length - 1, 0)),
+          onFailover: (event) => {
+            usageInfo.providerId = event.to.providerId;
+            usageInfo.model = event.to.model;
+            this.emitFailover(event);
+          },
+        },
+      ),
+      usageInfo,
+      Date.now(),
+    );
+    const mapped = toAnthropicStreamEvents(stream, model, estimateAnthropicInputTokens(body));
+
+    // Peek the first event before committing to HTTP 200.
+    const iterator = mapped[Symbol.asyncIterator]();
+    let first: IteratorResult<string>;
+    try {
+      first = await iterator.next();
+    } catch (err) {
+      if (res.destroyed || res.writableEnded) return;
+      const { status, body: errBody } = toAnthropicError(err);
+      this.log(`  !! ${provider.id} failed: HTTP ${status} ${(errBody.error as { type?: string })?.type ?? 'error'}`);
+      this.sendJson(res, status, errBody);
+      return;
+    }
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
-    });
-
-    // Abort the upstream call if the client disconnects mid-stream.
-    res.on('close', () => {
-      if (!res.writableEnded) controller.abort();
     });
 
     // Keep-alive pings: Claude Code aborts streams that go silent for ~300s,
@@ -560,12 +729,8 @@ export class OpenAICompatibleServer {
     }, 15_000);
 
     try {
-      const stream = this.trackStream(
-        provider.stream({ ...params, signal: controller.signal }, credentials),
-        { providerId: provider.id, model, wire: 'messages', streamed: true },
-        Date.now(),
-      );
-      for await (const line of toAnthropicStreamEvents(stream, model, estimateAnthropicInputTokens(body))) {
+      if (!first.done) res.write(first.value);
+      for await (const line of { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<string>) {
         res.write(line);
       }
       res.end();
@@ -618,8 +783,16 @@ export class OpenAICompatibleServer {
 
     this.log(`  -> ${provider.id}/${model} (gemini)`);
     const startedAt = Date.now();
-    const result = await provider.chat(params, credentials);
-    this.reportUsage({ providerId: provider.id, model, wire: 'gemini', streamed: false }, result.usage, startedAt);
+    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
+    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const { value: result, target } = await this.withFailover(targets, (lane) =>
+      lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+    );
+    this.reportUsage(
+      { providerId: target.provider.id, model: target.model, wire: 'gemini', streamed: false },
+      result.usage,
+      startedAt,
+    );
     this.sendJson(res, 200, toGeminiCompletion(result, model, estimateGeminiInputTokens(body)));
   }
 
@@ -633,6 +806,48 @@ export class OpenAICompatibleServer {
     body: GeminiRequest,
   ): Promise<void> {
     const controller = new AbortController();
+    // Abort the upstream call if the client disconnects mid-stream.
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+
+    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
+    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const usageInfo = { providerId: provider.id, model, wire: 'gemini' as const, streamed: true };
+    const opts = this.options.autoMode;
+    const stream = this.trackStream(
+      withFailoverStream(
+        targets,
+        (lane) =>
+          lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
+        {
+          codes: retryableCodesFor(opts),
+          maxAttempts: maxAttemptsFor(opts, Math.max(targets.length - 1, 0)),
+          onFailover: (event) => {
+            usageInfo.providerId = event.to.providerId;
+            usageInfo.model = event.to.model;
+            this.emitFailover(event);
+          },
+        },
+      ),
+      usageInfo,
+      Date.now(),
+    );
+    const mapped = toGeminiStreamEvents(stream, model, estimateGeminiInputTokens(body));
+
+    // Peek the first event before committing to HTTP 200.
+    const iterator = mapped[Symbol.asyncIterator]();
+    let first: IteratorResult<string>;
+    try {
+      first = await iterator.next();
+    } catch (err) {
+      if (res.destroyed || res.writableEnded) return;
+      const { status, body: errBody } = toGeminiError(err);
+      this.log(`  !! ${provider.id} failed: HTTP ${status} ${(errBody.error as { status?: string })?.status ?? 'INTERNAL'}`);
+      this.sendJson(res, status, errBody);
+      return;
+    }
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -640,18 +855,9 @@ export class OpenAICompatibleServer {
       'X-Accel-Buffering': 'no',
     });
 
-    // Abort the upstream call if the client disconnects mid-stream.
-    res.on('close', () => {
-      if (!res.writableEnded) controller.abort();
-    });
-
     try {
-      const stream = this.trackStream(
-        provider.stream({ ...params, signal: controller.signal }, credentials),
-        { providerId: provider.id, model, wire: 'gemini', streamed: true },
-        Date.now(),
-      );
-      for await (const line of toGeminiStreamEvents(stream, model, estimateGeminiInputTokens(body))) {
+      if (!first.done) res.write(first.value);
+      for await (const line of { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<string>) {
         res.write(line);
       }
       res.end();
@@ -733,6 +939,55 @@ export class OpenAICompatibleServer {
     return credentials;
   }
 
+  /** Resolve auto-mode fallback lanes for a routed primary (provider/model). */
+  private async resolveLaneTargets(providerId: string, model: string): Promise<ResolvedLane[]> {
+    const lanes: ResolvedLane[] = [];
+    for (const target of resolveLanes({ providerId, model }, this.options.autoMode)) {
+      const provider = this.providers.find((p) => p.id === target.providerId);
+      if (!provider) continue;
+      lanes.push({
+        ...target,
+        provider,
+        credentials: await this.resolveCredentials(target.providerId),
+      });
+    }
+    return lanes;
+  }
+
+  /** Run a provider call with auto-mode failover; returns the result + lane used. */
+  private withFailover<T>(
+    targets: ResolvedLane[],
+    call: (lane: ResolvedLane) => Promise<T>,
+  ): Promise<{ value: T; target: ResolvedLane }> {
+    const opts = this.options.autoMode;
+    return withFailover(
+      targets,
+      (lane) => call(lane),
+      {
+        codes: retryableCodesFor(opts),
+        maxAttempts: maxAttemptsFor(opts, Math.max(targets.length - 1, 0)),
+        onFailover: (event) => this.emitFailover(event),
+      },
+    );
+  }
+
+  private emitFailover(event: FailoverEvent): void {
+    this.log(
+      `  ~~ auto-mode failover ${event.from.providerId}/${event.from.model} -> ${event.to.providerId}/${event.to.model} (${event.error.code}${event.error.status ? ` HTTP ${event.error.status}` : ''})`,
+    );
+    // Strip ResolvedLane extras (provider object, credentials) so telemetry
+    // carries only the lane identity.
+    const clean: FailoverEvent = {
+      at: event.at,
+      from: { providerId: event.from.providerId, model: event.from.model },
+      to: { providerId: event.to.providerId, model: event.to.model },
+      error: event.error,
+      attempt: event.attempt,
+    };
+    this.options.onFailover?.(clean);
+    this.usageTracker.recordFailover(clean);
+  }
+
   private readBody(req: IncomingMessage): Promise<unknown> {
     const max = this.options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
     return new Promise((resolve, reject) => {
@@ -799,6 +1054,7 @@ export class OpenAICompatibleServer {
 
   private emitUsage(event: UsageEvent): void {
     this.options.onUsage?.(event);
+    this.usageTracker.record(event);
   }
 
   /** Report usage for a completed non-stream call. */

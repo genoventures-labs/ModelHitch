@@ -11,6 +11,8 @@
   <a href="#quickstart">Quickstart</a> ·
   <a href="#providers">Providers</a> ·
   <a href="#agent-bridge">Agent bridge</a> ·
+  <a href="#auto-mode-survive-rate-limits">Auto-mode</a> ·
+  <a href="#usage-tokens-and-spend">Usage</a> ·
   <a href="#development">Development</a>
 </p>
 
@@ -232,6 +234,7 @@ const server = createModelHitchServer({
     'opencode-zen': [...OPENCODE_ZEN_MODELS],
     'opencode-go': [...OPENCODE_GO_MODELS],
   },
+  autoMode: true, // fail over on 429/5xx/network errors — see below
   logger: console.log,
 });
 
@@ -259,6 +262,9 @@ The bridge speaks:
 | `POST /v1/messages` | Claude Code and Anthropic clients |
 | `POST /v1beta/models/{model}:generateContent` | Gemini CLI |
 | `GET /v1/models`, `GET /healthz` | Discovery and health checks |
+| `GET /v1/usage` | Usage snapshot as JSON |
+| `GET /usage` | Live usage dashboard (HTML, auto-refreshing) |
+| `POST /v1/usage/reset` | Clear in-memory usage totals |
 
 Supported harnesses include Codex CLI, Claude Code, Gemini CLI, Aider, Continue, Cline, Roo,
 Kilo, Goose, OpenCode CLI, Zed, and any client with a custom OpenAI-compatible endpoint.
@@ -307,6 +313,105 @@ The bridge accepts request bodies up to 64 MiB by default for inline images. Set
 `MODELHITCH_MAX_BODY_BYTES` to tune the CLI bridge. For opaque upstream failures,
 `MODELHITCH_DEBUG=1` logs the forwarded body and full upstream error.
 
+## Auto-mode: survive rate limits
+
+When a lane gets rate-limited (`opencode-zen failed: HTTP 429 rate-limited` and friends), a 5xx
+provider blip, or a network hiccup, auto-mode transparently retries the request on the next
+lane — no agent restart, no failed turn. It works on every wire (chat, responses, messages,
+Gemini), streamed and non-streamed.
+
+Turn it on with `autoMode: true` (or a custom lineup):
+
+```ts
+import { createModelHitchServer } from 'modelhitch';
+
+const server = createModelHitchServer({
+  autoMode: {
+    // Same-provider fallback models first, then cross-provider lanes.
+    models: ['deepseek-v4-flash-free', 'mimo-v2.5-free'],
+    lanes: [{ providerId: 'opencode-go', model: 'deepseek-v4-flash' }],
+    retryableCodes: ['rate-limited', 'provider-error', 'network-error'],
+    maxAttempts: 5,
+  },
+  onFailover: (event) => console.log(`${event.from.providerId}/${event.from.model} -> ${event.to.providerId}/${event.to.model}`),
+});
+```
+
+`autoMode: true` uses the default lineup, tuned to the OpenCode Go usage limits
+([docs](https://opencode.ai/docs/go#usage-limits) — $12/5h, $30/wk, $60/mo, then free models):
+
+1. `opencode-go/deepseek-v4-flash` — cheapest Go subscription model, largest included allowance
+2. `opencode-zen/big-pickle` — the Zen default
+3. `opencode-zen/deepseek-v4-flash-free` — free Zen model
+4. `opencode-zen/mimo-v2.5-free` — free Zen model
+
+How it behaves:
+
+- **Detection** — any error whose code is in `retryableCodes` **or** whose HTTP status is 429
+  triggers failover (some adapters surface 429s with a different code, so the status check
+  always applies). Aborts, cancellations, bad requests, and auth failures never retry.
+- **Credential safety** — lanes without a configured key (`missing-api-key`/`invalid-api-key`)
+  are skipped silently. Fallback lanes resolve keys from the keystore or the provider's env
+  fallback; a per-call `apiKey` stays with the primary lane.
+- **Streams fail over pre-content** — a 429 during the first chunk restarts the stream on the
+  next lane before HTTP 200 is committed, so the client sees a real retry, never a half-written
+  response. Once content has been emitted, mid-stream errors propagate (retrying would
+  duplicate output).
+- **First error wins** — if every lane fails, the original lane's error is rethrown, because
+  that's the actionable one.
+
+The same options work on the client class:
+
+```ts
+const mh = new ModelHitch({ autoMode: true, onFailover: console.log });
+```
+
+## Usage, tokens, and spend
+
+The bridge tracks every completed request in memory: provider, model, wire, tokens, estimated
+cost, latency, plus every failover. Point a browser at `http://127.0.0.1:3939/usage` for the
+live dashboard, or read the JSON:
+
+```bash
+curl http://127.0.0.1:3939/v1/usage
+```
+
+```jsonc
+{
+  "totals": { "requests": 42, "inputTokens": 120000, "outputTokens": 34000, "totalTokens": 154000, "costUsd": 1.83, "latencyMs": 98123 },
+  "perProvider": { "opencode-zen": { /* totals scoped to this provider */ } },
+  "perModel": { "opencode-zen/big-pickle": { /* totals scoped to this model */ } },
+  "perWire": { "chat-completions": { /* totals per wire */ } },
+  "recent": [ /* last 50 events, newest first */ ],
+  "failovers": { "total": 3, "recent": [ /* last 20 */ ] },
+  "windows": {
+    "5h":  { /* cost + fraction of the $12 cap */ },
+    "7d":  { /* cost + fraction of the $30 cap */ },
+    "30d": { /* cost + fraction of the $60 cap */ }
+  }
+}
+```
+
+The windows mirror the OpenCode Go usage limits, so you can see at a glance how close the
+bridge is to a paid-limit block. Cost estimates come from built-in list pricing
+(see `estimateCost`), are best-effort, and report $0 for free/unknown models.
+
+Track usage programmatically with the `UsageTracker` class:
+
+```ts
+import { UsageTracker } from 'modelhitch';
+
+const usage = new UsageTracker();
+const server = createModelHitchServer({
+  usageTracker: usage,
+  onUsage: (event) => myMeteringDb.record(event), // every completed request
+});
+
+console.log(usage.snapshot().totals.costUsd);
+```
+
+Totals are in-memory and reset when the bridge restarts.
+
 ## Errors and usage
 
 ```ts
@@ -326,6 +431,9 @@ Stable codes include `missing-api-key`, `invalid-api-key`, `rate-limited`, `mode
 
 Use `onUsage` on the bridge for request metering, or `estimateCost(model, usage, providerId?)`
 for best-effort offline estimates. Local providers are free in the estimator.
+
+Enable [`autoMode`](#auto-mode-survive-rate-limits) to have the bridge (or the `ModelHitch`
+client) retry 429/5xx/network failures on fallback lanes automatically.
 
 ## Contributing
 
