@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ModelHitchError } from '../core/errors.js';
+import { estimateCost } from '../core/cost.js';
 import type { KeyStore } from '../core/keystore.js';
-import type { ChatParams, ProviderCredentials } from '../core/types.js';
+import type { ChatParams, ProviderCredentials, StreamChunk, Usage } from '../core/types.js';
 import { defaultProviders } from '../registry.js';
 import type { Provider } from '../providers/types.js';
 import { mapFinishReasonOpenAI, mapRequest, routeModel, toChatCompletion, toOpenAIError, toUsageOutput } from './mapping.js';
@@ -49,6 +50,34 @@ export interface ModelHitchServerOptions {
   maxBodyBytes?: number;
   /** Called once per request with a one-line summary. */
   logger?: (line: string) => void;
+  /**
+   * Called once per completed inference request with token usage + cost.
+   * Fires for successful non-stream calls and for streams that run to
+   * completion (not for aborted/disconnected streams). Handy for dashboards,
+   * per-user metering, or rate-limit accounting.
+   */
+  onUsage?: (event: UsageEvent) => void;
+}
+
+/** One completed inference request, as reported to the `onUsage` hook. */
+export interface UsageEvent {
+  /** Provider id, e.g. "opencode-zen". */
+  providerId: string;
+  /** Routed model id. */
+  model: string;
+  /** Wire that served the request: chat-completions | responses | messages | gemini. */
+  wire: string;
+  /** True when the client requested SSE streaming. */
+  streamed: boolean;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  /** Estimated USD (best-effort list pricing; 0 for free/unknown). */
+  costUsd: number;
+  /** Wall time from request start to completion, ms. */
+  latencyMs: number;
+  /** ISO timestamp. */
+  at: string;
 }
 
 const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -243,7 +272,9 @@ export class OpenAICompatibleServer {
     }
 
     this.log(`  -> ${provider.id}/${model}`);
+    const startedAt = Date.now();
     const result = await provider.chat(params, credentials);
+    this.reportUsage({ providerId: provider.id, model, wire: 'chat-completions', streamed: false }, result.usage, startedAt);
     this.sendJson(res, 200, toChatCompletion(result, model));
   }
 
@@ -259,6 +290,7 @@ export class OpenAICompatibleServer {
     const id = `chatcmpl-${randomUUID()}`;
     const created = Math.floor(Date.now() / 1000);
     const chunkBase = { id, object: 'chat.completion.chunk' as const, created, model };
+    const startedAt = Date.now();
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -281,7 +313,11 @@ export class OpenAICompatibleServer {
     };
 
     try {
-      const stream = provider.stream({ ...params, signal: controller.signal }, credentials);
+      const stream = this.trackStream(
+        provider.stream({ ...params, signal: controller.signal }, credentials),
+        { providerId: provider.id, model, wire: 'chat-completions', streamed: true },
+        startedAt,
+      );
       for await (const event of stream) {
         switch (event.type) {
           case 'text-delta': {
@@ -369,7 +405,9 @@ export class OpenAICompatibleServer {
     }
 
     this.log(`  -> ${provider.id}/${model} (responses)`);
+    const startedAt = Date.now();
     const result = await provider.chat(params, credentials);
+    this.reportUsage({ providerId: provider.id, model, wire: 'responses', streamed: false }, result.usage, startedAt);
     this.sendJson(res, 200, toResponsesCompletion(result, model));
   }
 
@@ -395,7 +433,11 @@ export class OpenAICompatibleServer {
     });
 
     try {
-      const stream = provider.stream({ ...params, signal: controller.signal }, credentials);
+      const stream = this.trackStream(
+        provider.stream({ ...params, signal: controller.signal }, credentials),
+        { providerId: provider.id, model, wire: 'responses', streamed: true },
+        Date.now(),
+      );
       for await (const line of toResponsesStreamEvents(stream, model)) {
         res.write(line);
       }
@@ -435,7 +477,9 @@ export class OpenAICompatibleServer {
     }
 
     this.log(`  -> ${provider.id}/${model} (anthropic)`);
+    const startedAt = Date.now();
     const result = await provider.chat(params, credentials);
+    this.reportUsage({ providerId: provider.id, model, wire: 'messages', streamed: false }, result.usage, startedAt);
     this.sendJson(res, 200, toAnthropicCompletion(result, model, estimateAnthropicInputTokens(body)));
   }
 
@@ -468,7 +512,11 @@ export class OpenAICompatibleServer {
     }, 15_000);
 
     try {
-      const stream = provider.stream({ ...params, signal: controller.signal }, credentials);
+      const stream = this.trackStream(
+        provider.stream({ ...params, signal: controller.signal }, credentials),
+        { providerId: provider.id, model, wire: 'messages', streamed: true },
+        Date.now(),
+      );
       for await (const line of toAnthropicStreamEvents(stream, model, estimateAnthropicInputTokens(body))) {
         res.write(line);
       }
@@ -521,7 +569,9 @@ export class OpenAICompatibleServer {
     }
 
     this.log(`  -> ${provider.id}/${model} (gemini)`);
+    const startedAt = Date.now();
     const result = await provider.chat(params, credentials);
+    this.reportUsage({ providerId: provider.id, model, wire: 'gemini', streamed: false }, result.usage, startedAt);
     this.sendJson(res, 200, toGeminiCompletion(result, model, estimateGeminiInputTokens(body)));
   }
 
@@ -548,7 +598,11 @@ export class OpenAICompatibleServer {
     });
 
     try {
-      const stream = provider.stream({ ...params, signal: controller.signal }, credentials);
+      const stream = this.trackStream(
+        provider.stream({ ...params, signal: controller.signal }, credentials),
+        { providerId: provider.id, model, wire: 'gemini', streamed: true },
+        Date.now(),
+      );
       for await (const line of toGeminiStreamEvents(stream, model, estimateGeminiInputTokens(body))) {
         res.write(line);
       }
@@ -679,6 +733,55 @@ export class OpenAICompatibleServer {
 
   private log(line: string): void {
     this.options.logger?.(line);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Usage / cost tracking
+  // ---------------------------------------------------------------------------
+
+  private emitUsage(event: UsageEvent): void {
+    this.options.onUsage?.(event);
+  }
+
+  /** Report usage for a completed non-stream call. */
+  private reportUsage(
+    info: { providerId: string; model: string; wire: string; streamed: boolean },
+    usage: Usage | undefined,
+    startedAt: number,
+  ): void {
+    if (!usage) return;
+    const cost = estimateCost(info.model, usage, info.providerId);
+    this.emitUsage({
+      ...info,
+      inputTokens: usage.inputTokens ?? 0,
+      outputTokens: usage.outputTokens ?? 0,
+      totalTokens: usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0),
+      costUsd: cost.totalCostUsd,
+      latencyMs: Date.now() - startedAt,
+      at: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Wrap a provider stream to capture the `finish` event's usage and report
+   * it via `onUsage` once the stream runs to completion. Pass-through: chunk
+   * events are re-emitted untouched. Aborted/errored streams report nothing
+   * (their usage is partial at best).
+   */
+  private trackStream(
+    stream: AsyncIterable<StreamChunk>,
+    info: { providerId: string; model: string; wire: string; streamed: boolean },
+    startedAt: number,
+  ): AsyncIterable<StreamChunk> {
+    const self = this;
+    let usage: Usage | undefined;
+    return (async function* () {
+      for await (const chunk of stream) {
+        if (chunk.type === 'finish') usage = chunk.usage;
+        yield chunk;
+      }
+      self.reportUsage(info, usage, startedAt);
+    })();
   }
 }
 

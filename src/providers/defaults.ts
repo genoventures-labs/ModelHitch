@@ -77,3 +77,48 @@ export const lmstudio: Provider = createOpenAICompatibleProvider({
     embeddings: true,
   },
 });
+
+/** vLLM — fully local, no key required. Serves whatever models are loaded. */
+export const vllm: Provider = createOpenAICompatibleProvider({
+  id: 'vllm',
+  name: 'vLLM (local)',
+  baseUrl: 'http://localhost:8000/v1',
+  defaultModel: 'local-model',
+  requiresKey: false,
+  capabilities: {
+    streaming: true,
+    toolCalling: true,
+    vision: false,
+    embeddings: false,
+  },
+});
+
+/** llama.cpp (llama-server) — fully local, no key required. */
+export const llamacpp: Provider = createOpenAICompatibleProvider({
+  id: 'llamacpp',
+  name: 'llama.cpp (local)',
+  baseUrl: 'http://localhost:8080/v1',
+  defaultModel: 'local-model',
+  requiresKey: false,
+  capabilities: {
+    streaming: true,
+    toolCalling: true,
+    vision: false,
+    embeddings: false,
+  },
+});
+
+/** KoboldCpp — fully local, no key required. */
+export const koboldcpp: Provider = createOpenAICompatibleProvider({
+  id: 'koboldcpp',
+  name: 'KoboldCpp (local)',
+  baseUrl: 'http://localhost:5001/v1',
+  defaultModel: 'local-model',
+  requiresKey: false,
+  capabilities: {
+    streaming: true,
+    toolCalling: true,
+    vision: false,
+    embeddings: false,
+  },
+});

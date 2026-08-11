@@ -1,0 +1,115 @@
+import { describe, expect, it } from 'vitest';
+import { ModelHitch, runToolLoop } from '../src/index.js';
+
+const mh = new ModelHitch();
+const TOOLS = [{ name: 'get_weather', description: 'weather lookup', parameters: { type: 'object' } }];
+
+describe('runToolLoop', () => {
+  it('streams a single text turn and reports done with totals', async () => {
+    const events: string[] = [];
+    let done: any;
+
+    for await (const ev of runToolLoop(
+      mh,
+      { provider: 'mock', messages: [{ role: 'user', content: 'hello there' }] },
+      async () => '',
+    )) {
+      if (ev.type === 'chunk') events.push(`chunk:${ev.chunk.type}`);
+      if (ev.type === 'turn') events.push(`turn:${ev.turn}`);
+      if (ev.type === 'done') done = ev;
+    }
+
+    expect(events.filter((e) => e.startsWith('chunk:text-delta')).length).toBeGreaterThan(0);
+    expect(events).toContain('turn:1');
+    expect(events[events.length - 1]).toBe('turn:1'); // turn always before done
+
+    expect(done.turns).toBe(1);
+    expect(done.messages).toEqual([
+      { role: 'user', content: 'hello there' },
+      { role: 'assistant', content: 'Mock reply: hello there ' }, // mock streams word + trailing space
+    ]);
+    expect(done.final.message.content).toBe('Mock reply: hello there ');
+    expect(done.usage.inputTokens).toBe(10);
+    expect(done.usage.outputTokens).toBeGreaterThan(0);
+  });
+
+  it('executes tool calls and feeds results back until the turn cap', async () => {
+    const calls: Array<{ name: string; args: unknown }> = [];
+    const events: string[] = [];
+    let done: any;
+
+    for await (const ev of runToolLoop(
+      mh,
+      {
+        provider: 'mock',
+        messages: [{ role: 'user', content: '!tool get_weather' }],
+        tools: TOOLS,
+      },
+      async (name, args) => {
+        calls.push({ name, args });
+        return '{"temp":18,"condition":"Sunny"}';
+      },
+      { maxTurns: 2 },
+    )) {
+      if (ev.type === 'chunk') events.push(`chunk:${ev.chunk.type}`);
+      if (ev.type === 'turn') events.push(`turn:${ev.turn}`);
+      if (ev.type === 'tool') events.push(`tool:${ev.turn}:${ev.call.name}`);
+      if (ev.type === 'done') done = ev;
+    }
+
+    // The mock re-triggers "!tool get_weather" every turn, so with maxTurns 2
+    // we see exactly two tool rounds, then the loop stops at the cap.
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual({ name: 'get_weather', args: { q: 'mock query' } });
+    expect(calls[1]).toEqual({ name: 'get_weather', args: { q: 'mock query' } });
+
+    // Per-turn order: chunks stream in, then turn result, then the tool event.
+    expect(events).toContain('tool:1:get_weather');
+    expect(events).toContain('tool:2:get_weather');
+    expect(events.indexOf('chunk:finish')).toBeLessThan(events.indexOf('tool:1:get_weather'));
+
+    expect(done.turns).toBe(2);
+    expect(done.messages).toHaveLength(5); // user, assistant, tool, assistant, tool
+    expect(done.messages[2]).toEqual({
+      role: 'tool',
+      content: '{"temp":18,"condition":"Sunny"}',
+      toolCallId: 'call_mock_1',
+    });
+    // Tool-only turns in the mock stream carry no usage, so totals stay empty.
+    expect(done.usage).toEqual({});
+  });
+
+  it('stops as soon as the model answers without tools', async () => {
+    const events: string[] = [];
+    let done: any;
+
+    // A text-only prompt never triggers a tool call; exactly one turn.
+    for await (const ev of runToolLoop(
+      mh,
+      { provider: 'mock', messages: [{ role: 'user', content: 'no tools here' }] },
+      async () => '',
+    )) {
+      if (ev.type === 'turn') events.push(`turn:${ev.turn}`);
+      if (ev.type === 'done') done = ev;
+    }
+
+    expect(events).toEqual(['turn:1']);
+    expect(done.turns).toBe(1);
+  });
+
+  it('propagates executor errors out of the generator', async () => {
+    const gen = runToolLoop(
+      mh,
+      { provider: 'mock', messages: [{ role: 'user', content: '!tool explode' }], tools: TOOLS },
+      async () => {
+        throw new Error('boom');
+      },
+    );
+
+    await expect(async () => {
+      for await (const _ of gen) {
+        // consume
+      }
+    }).rejects.toThrowError('boom');
+  });
+});

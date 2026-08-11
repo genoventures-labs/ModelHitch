@@ -1,4 +1,4 @@
-export { openai, groq, openrouter, together, lmstudio } from './defaults.js';
+export { openai, groq, openrouter, together, lmstudio, vllm, llamacpp, koboldcpp } from './defaults.js';
 export {
   opencodeZen,
   opencodeGo,

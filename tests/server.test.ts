@@ -216,3 +216,94 @@ describe('bridge health', () => {
     expect(await res.json()).toEqual({ status: 'ok' });
   });
 });
+
+describe('bridge onUsage hook', () => {
+  let usageServer: OpenAICompatibleServer;
+  let usageBase: string;
+  const events: any[] = [];
+
+  beforeAll(async () => {
+    usageServer = createModelHitchServer({
+      providers: [mockProvider],
+      defaultProviderId: 'mock',
+      onUsage: (ev) => events.push(ev),
+    });
+    const info = await usageServer.listen(0, '127.0.0.1');
+    usageBase = info.url;
+  });
+
+  afterAll(async () => {
+    await usageServer.close();
+  });
+
+  it('reports usage + cost for non-stream calls', async () => {
+    const res = await fetch(`${usageBase}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'mock-model',
+        messages: [{ role: 'user', content: 'hi there' }],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(events).toHaveLength(1);
+    const ev = events[0];
+    expect(ev.providerId).toBe('mock');
+    expect(ev.model).toBe('mock-model');
+    expect(ev.wire).toBe('chat-completions');
+    expect(ev.streamed).toBe(false);
+    expect(ev.inputTokens).toBe(10);
+    expect(ev.outputTokens).toBeGreaterThan(0);
+    expect(ev.totalTokens).toBe(ev.inputTokens + ev.outputTokens);
+    expect(typeof ev.costUsd).toBe('number');
+    expect(ev.latencyMs).toBeGreaterThanOrEqual(0);
+    expect(new Date(ev.at).getTime()).not.toBeNaN();
+  });
+
+  it('reports streamed calls with streamed: true', async () => {
+    const res = await fetch(`${usageBase}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'mock-model',
+        stream: true,
+        messages: [{ role: 'user', content: 'stream me' }],
+      }),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    const ev = events[events.length - 1];
+    expect(ev.streamed).toBe(true);
+    expect(ev.inputTokens).toBe(10);
+  });
+
+  it('skips events when the provider reports no usage (tool-only turns)', async () => {
+    const before = events.length;
+    const res = await fetch(`${usageBase}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'mock-model',
+        stream: true,
+        messages: [{ role: 'user', content: '!tool get_weather' }],
+      }),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    // The mock's tool-call stream carries no usage on its finish chunk.
+    expect(events).toHaveLength(before);
+  });
+
+  it('fires for the gemini wire with wire: "gemini"', async () => {
+    const res = await fetch(`${usageBase}/v1beta/models/mock-model:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'hi gemini' }] }] }),
+    });
+    expect(res.status).toBe(200);
+    const ev = events[events.length - 1];
+    expect(ev.wire).toBe('gemini');
+    expect(ev.model).toBe('mock-model');
+    expect(ev.streamed).toBe(false);
+  });
+});

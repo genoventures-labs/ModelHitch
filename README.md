@@ -60,6 +60,9 @@ for await (const chunk of stream) {
 | Together AI | `together` | `https://api.together.xyz/v1` | `TOGETHER_API_KEY` |
 | LM Studio (local) | `lmstudio` | `http://localhost:1234/v1` | — |
 | Ollama (local) | `ollama` | `http://localhost:11434` | — |
+| vLLM (local) | `vllm` | `http://localhost:8000/v1` | — |
+| llama.cpp (local) | `llamacpp` | `http://localhost:8080/v1` | — |
+| KoboldCpp (local) | `koboldcpp` | `http://localhost:5001/v1` | — |
 | Mock (deterministic) | `mock` | — | — |
 
 Both `opencode-zen` and `opencode-go` also accept `OPENCODE_API_KEY` as a fallback env var.
@@ -206,6 +209,76 @@ if (result.finishReason === 'tool-calls') {
   }
 }
 ```
+
+## Agent loops — streaming tool-call chaining
+
+`runToolLoop` drives the full loop for you: stream a turn → execute each tool call →
+feed the results back → repeat until the model answers (or the turn cap is hit).
+It's an async generator, so you can render chunks live:
+
+```ts
+import { runToolLoop } from 'modelhitch';
+
+for await (const ev of runToolLoop(
+  mh,
+  { provider: 'opencode-zen', messages, tools: [weatherTool] },
+  async (name, args) => myToolRunner(name, args), // → tool result text
+  { maxTurns: 8 },
+)) {
+  if (ev.type === 'chunk' && ev.chunk.type === 'text-delta') ui.append(ev.chunk.text);
+  if (ev.type === 'tool') console.log(`called ${ev.call.name} → ${ev.output}`);
+  if (ev.type === 'done') console.log(ev.messages, ev.usage); // full history + totals
+}
+```
+
+Events: `chunk` (every raw `StreamChunk`), `turn` (aggregated `ChatResult`), `tool`
+(executor output), `done` (messages + usage totals + final result). If the executor
+throws, the error propagates out of the generator — wrap it to feed failures back
+to the model as tool output.
+
+## Usage & cost tracking
+
+The bridge reports every completed request (streamed or not) through the `onUsage`
+option — handy for dashboards, metering, or rate-limit accounting:
+
+```ts
+const server = createModelHitchServer({
+  providers,
+  onUsage: (ev) => {
+    console.log(`${ev.providerId}/${ev.model} ${ev.wire} ${ev.streamed ? 'stream' : 'chat'}:`,
+      `${ev.inputTokens}+${ev.outputTokens} tok ≈ $${ev.costUsd.toFixed(4)} in ${ev.latencyMs}ms`);
+  },
+});
+```
+
+`estimateCost(model, usage, providerId?)` is exported for offline cost estimation
+(best-effort list pricing; local providers are free). Aborted/disconnected streams
+report nothing — their usage is partial at best.
+
+## React hooks — BYOK UI in a day
+
+`modelhitch/react` ships `useChat` and `useStream` for building a chat UI that
+points at a local bridge (keys stay on the device):
+
+```tsx
+import { useChat } from 'modelhitch/react';
+
+function Chat() {
+  const { messages, pending, send, isThinking, usage, reset } = useChat({
+    baseUrl: 'http://127.0.0.1:3939/v1',
+    model: 'opencode-zen/big-pickle',
+    systemPrompt: 'You are a helpful assistant.',
+    tools: [weatherTool],
+    executeTool: async (name, args) => /* your backend call */,
+  });
+  return (/* render messages + pending, call send(text) */);
+}
+```
+
+`useStream` is the lower-level hook: `start(messages)` streams one turn and exposes
+`text` / `toolCalls` / `usage` as they arrive, with `cancel()` support. A runnable
+demo lives in `examples/byok-ui/` (`npm run server` + `npm run dev` inside that
+folder) — zero config, uses the deterministic mock provider.
 
 ## Error handling
 
@@ -555,10 +628,10 @@ npm run canary      # end-to-end tool-call test through the bridge (needs a Zen 
 * ~~Claude Code gateway wire protocol (`/v1/messages`) on the bridge~~ ✅ done
 * ~~Harness compatibility matrix (Aider, Continue, Cline, Goose, OpenCode, Zed, ...)~~ ✅ done
 * ~~Gemini CLI wire protocol (`:generateContent`) on the bridge~~ ✅ done
-* Streaming tool-call chaining helper
-* Usage/cost tracking hooks
-* React hooks (`useChat`, `useStream`) for the BYOK UI
-* More local providers (vLLM, llama.cpp, KoboldCpp)
+* ~~More local providers (vLLM, llama.cpp, KoboldCpp)~~ ✅ done
+* ~~Streaming tool-call chaining helper~~ ✅ done
+* ~~Usage/cost tracking hooks~~ ✅ done
+* ~~React hooks (`useChat`, `useStream`) for the BYOK UI~~ ✅ done
 
 ## License
 

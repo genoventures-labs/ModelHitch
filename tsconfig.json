@@ -14,5 +14,6 @@
     "sourceMap": true,
     "outDir": "dist"
   },
-  "include": ["src", "examples", "tests"]
+  "include": ["src", "examples", "tests"],
+  "exclude": ["examples/byok-ui"]
 }

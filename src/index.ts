@@ -2,6 +2,7 @@
 // Hitch any model to your app: one interface, user-supplied providers & keys.
 
 export { ModelHitch, type ModelHitchOptions, type ChatInput } from './client.js';
+export { runToolLoop, type ToolExecutor, type ToolLoopOptions, type ToolLoopEvent } from './agent.js';
 export { defaultProviders } from './registry.js';
 export { MemoryKeyStore } from './storage/memory.js';
 export { LocalStorageKeyStore } from './storage/local-storage.js';
@@ -50,6 +51,9 @@ export {
   together,
   lmstudio,
   ollama,
+  vllm,
+  llamacpp,
+  koboldcpp,
   mockProvider,
 } from './providers/index.js';
 
