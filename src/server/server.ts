@@ -7,6 +7,15 @@ import type { ChatParams, ProviderCredentials } from '../core/types.js';
 import { defaultProviders } from '../registry.js';
 import type { Provider } from '../providers/types.js';
 import { mapFinishReasonOpenAI, mapRequest, routeModel, toChatCompletion, toOpenAIError, toUsageOutput } from './mapping.js';
+import {
+  estimateAnthropicInputTokens,
+  mapAnthropicRequest,
+  toAnthropicCompletion,
+  toAnthropicError,
+  toAnthropicStreamEvents,
+  type AnthropicRequest,
+} from './anthropic-wire.js';
+import { mapResponsesRequest, toResponsesCompletion, toResponsesStreamEvents, type ResponsesRequest } from './responses.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 
 export interface ModelHitchServerOptions {
@@ -47,7 +56,11 @@ const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
  *
  * Endpoints:
  * - `POST /v1/chat/completions` (stream + non-stream)
+ * - `POST /v1/responses` (stream + non-stream — Codex CLI / Responses-API clients)
+ * - `POST /v1/messages` (stream + non-stream — Claude Code / Anthropic-format clients)
+ * - `POST /v1/messages/count_tokens` (Claude Code token counting)
  * - `GET /v1/models` and `GET /v1/models/:id`
+ * - `HEAD /api/hello` (Claude Code connection-warming probe)
  * - `GET /healthz`
  *
  * Model routing: `providerId/modelId` (e.g. `opencode-zen/big-pickle`); bare
@@ -125,6 +138,48 @@ export class OpenAICompatibleServer {
     if (method === 'POST' && path === '/v1/chat/completions') {
       this.log(`${method} ${path} ->`);
       await this.handleChat(req, res);
+      return;
+    }
+
+    if (method === 'POST' && path === '/v1/responses') {
+      this.log(`${method} ${path} ->`);
+      await this.handleResponses(req, res);
+      return;
+    }
+
+    // Claude Code / Anthropic-format gateways. Claude Code posts to
+    // `/v1/messages?beta=true` — `url.pathname` strips the query for us.
+    if (method === 'POST' && path === '/v1/messages') {
+      this.log(`${method} ${path} ->`);
+      try {
+        await this.handleAnthropic(req, res);
+      } catch (err) {
+        // Non-stream Anthropic errors use the Anthropic error envelope.
+        if (res.headersSent) throw err;
+        const { status, body } = toAnthropicError(err);
+        const error = body.error as { type?: string; message?: string };
+        this.log(`  !! HTTP ${status} ${error.type ?? 'error'}: ${error.message ?? ''}`);
+        this.sendJson(res, status, body);
+      }
+      return;
+    }
+
+    if (method === 'POST' && path === '/v1/messages/count_tokens') {
+      this.log(`${method} ${path} ->`);
+      try {
+        await this.handleAnthropicCountTokens(req, res);
+      } catch (err) {
+        if (res.headersSent) throw err;
+        const { status, body } = toAnthropicError(err);
+        this.sendJson(res, status, body);
+      }
+      return;
+    }
+
+    // Best-effort connection-warming probe from Claude Code — safe to ignore.
+    if (method === 'HEAD' && path === '/api/hello') {
+      res.writeHead(200);
+      res.end();
       return;
     }
 
@@ -256,6 +311,153 @@ export class OpenAICompatibleServer {
       res.end();
       this.log(`  !! ${provider.id} failed: HTTP ${status} ${body.error.code}`);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Responses API (Codex CLI wire protocol)
+  // ---------------------------------------------------------------------------
+
+  private async handleResponses(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = (await this.readBody(req)) as ResponsesRequest | null;
+    const hasInput = Array.isArray(body?.input) && body!.input!.length > 0;
+    const hasInstructions = typeof body?.instructions === 'string' && body.instructions.length > 0;
+    if (!body || (!hasInput && !hasInstructions)) {
+      throw new ModelHitchError('bad-request', "The request body must include a non-empty 'input' array or 'instructions'.", { status: 400 });
+    }
+    const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
+    const credentials = await this.resolveCredentials(provider.id);
+    const params = mapResponsesRequest(body, model);
+    if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+
+    if (body.stream === true) {
+      this.log(`  -> ${provider.id}/${model} (responses stream)`);
+      await this.writeResponsesStream(res, provider, params, credentials, model);
+      return;
+    }
+
+    this.log(`  -> ${provider.id}/${model} (responses)`);
+    const result = await provider.chat(params, credentials);
+    this.sendJson(res, 200, toResponsesCompletion(result, model));
+  }
+
+  /** Stream a normalized provider stream out as Responses API SSE events. */
+  private async writeResponsesStream(
+    res: ServerResponse,
+    provider: Provider,
+    params: ChatParams,
+    credentials: ProviderCredentials,
+    model: string,
+  ): Promise<void> {
+    const controller = new AbortController();
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    // Abort the upstream call if the client disconnects mid-stream.
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+
+    try {
+      const stream = provider.stream({ ...params, signal: controller.signal }, credentials);
+      for await (const line of toResponsesStreamEvents(stream, model)) {
+        res.write(line);
+      }
+      res.end();
+    } catch (err) {
+      if (res.writableEnded) return;
+      const { status, body } = toOpenAIError(err);
+      res.write(
+        `data: ${JSON.stringify({
+          type: 'response.failed',
+          response: { error: { code: body.error.code ?? 'provider_error', message: body.error.message } },
+        })}\n\n`,
+      );
+      res.end();
+      this.log(`  !! ${provider.id} failed: HTTP ${status} ${body.error.code}`);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Anthropic Messages (Claude Code gateway wire protocol)
+  // ---------------------------------------------------------------------------
+
+  private async handleAnthropic(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = (await this.readBody(req)) as AnthropicRequest | null;
+    if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
+      throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
+    }
+    const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
+    const credentials = await this.resolveCredentials(provider.id);
+    const params = mapAnthropicRequest(body, model);
+    if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+
+    if (body.stream === true) {
+      this.log(`  -> ${provider.id}/${model} (anthropic stream)`);
+      await this.writeAnthropicStream(res, provider, params, credentials, model, body);
+      return;
+    }
+
+    this.log(`  -> ${provider.id}/${model} (anthropic)`);
+    const result = await provider.chat(params, credentials);
+    this.sendJson(res, 200, toAnthropicCompletion(result, model, estimateAnthropicInputTokens(body)));
+  }
+
+  /** Stream a normalized provider stream out as Anthropic Messages SSE events. */
+  private async writeAnthropicStream(
+    res: ServerResponse,
+    provider: Provider,
+    params: ChatParams,
+    credentials: ProviderCredentials,
+    model: string,
+    body: AnthropicRequest,
+  ): Promise<void> {
+    const controller = new AbortController();
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    // Abort the upstream call if the client disconnects mid-stream.
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+
+    // Keep-alive pings: Claude Code aborts streams that go silent for ~300s,
+    // so relay a ping while upstream is thinking.
+    const ping = setInterval(() => {
+      if (!res.writableEnded) res.write('event: ping\ndata: {"type":"ping"}\n\n');
+    }, 15_000);
+
+    try {
+      const stream = provider.stream({ ...params, signal: controller.signal }, credentials);
+      for await (const line of toAnthropicStreamEvents(stream, model, estimateAnthropicInputTokens(body))) {
+        res.write(line);
+      }
+      res.end();
+    } catch (err) {
+      if (res.writableEnded) return;
+      const { status, body: errBody } = toAnthropicError(err);
+      res.write(`event: error\ndata: ${JSON.stringify(errBody)}\n\n`);
+      res.end();
+      this.log(`  !! ${provider.id} failed: HTTP ${status} ${(errBody.error as { type?: string })?.type ?? 'error'}`);
+    } finally {
+      clearInterval(ping);
+    }
+  }
+
+  /** Claude Code's optional token counter — cheap estimate, no inference call. */
+  private async handleAnthropicCountTokens(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = await this.readBody(req);
+    if (!body || typeof body !== 'object' || !Array.isArray((body as AnthropicRequest).messages) || (body as AnthropicRequest).messages!.length === 0) {
+      throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
+    }
+    this.sendJson(res, 200, { input_tokens: estimateAnthropicInputTokens(body) });
   }
 
   // ---------------------------------------------------------------------------

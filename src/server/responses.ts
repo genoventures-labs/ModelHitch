@@ -1,0 +1,420 @@
+import { randomUUID } from 'node:crypto';
+import { safeJsonParse } from '../core/json.js';
+import { serializeText } from '../core/content.js';
+import type {
+  ChatParams,
+  ContentPart,
+  ModelMessage,
+  ResponseFormat,
+  StreamChunk,
+  ToolCall,
+  ToolChoice,
+  ToolDefinition,
+  Usage,
+} from '../core/types.js';
+import type { ChatResult } from '../core/types.js';
+
+/**
+ * OpenAI *Responses API* wire protocol — the only protocol Codex CLI custom
+ * model providers speak (`model_providers.<id>.wire_api = "responses"` is the
+ * only supported value, and the default).
+ *
+ * The bridge maps between the two wire protocols:
+ *
+ *   Codex (Responses API)  ->  normalized ChatParams  ->  family router
+ *     POST /v1/responses        (instructions/input items)   -> /chat/completions
+ *                                                             -> /responses
+ *                                                             -> /messages
+ *                                                             -> :generateContent
+ *
+ * Inbound, a Responses request has `instructions` + an `input` array of items
+ * (messages, top-level `function_call` and `function_call_output`). Outbound,
+ * a completion is a `{ object: 'response', output: [...] }` body, and streaming
+ * emits fine-grained SSE events (response.output_text.delta,
+ * response.function_call_arguments.delta, response.output_item.added/done,
+ * response.completed) — the same vocabulary the Zen /responses adapter parses.
+ */
+
+export interface ResponsesRequest {
+  model?: string;
+  /** System prompt, as a string or a list of text content parts. */
+  instructions?: string | Array<{ type?: string; text?: string }>;
+  /** Conversation items: messages, function_call, function_call_output, ... */
+  input?: unknown[];
+  /** Flat tool definitions: { type: 'function', name, description, parameters, strict }. */
+  tools?: Array<{
+    type?: string;
+    name?: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+    strict?: boolean;
+  }>;
+  /** "auto" | "none" | "required" | { type: 'function', name }. */
+  tool_choice?: unknown;
+  /** Structured output: { text: { format: { type: 'json_schema', ... } } }. */
+  text?: { format?: unknown };
+  stream?: boolean;
+  temperature?: number;
+  max_output_tokens?: number;
+  stop?: string | string[];
+}
+
+// ---------------------------------------------------------------------------
+// Inbound: Responses request -> normalized ChatParams
+// ---------------------------------------------------------------------------
+
+/** Convert a Responses content part into normalized text/content. */
+function partToContent(part: Record<string, unknown>, text: string): string | ContentPart[] {
+  const parts: ContentPart[] = [];
+  if (text) parts.push({ type: 'text', text });
+  if (part.type === 'input_image') {
+    const url = String((part.image_url as Record<string, unknown> | undefined)?.url ?? '');
+    const m = /^data:([^;,]+);base64,(.+)$/s.exec(url);
+    if (m) parts.push({ type: 'image-data', mimeType: m[1]!, data: m[2]! });
+    else if (url) parts.push({ type: 'image', imageUrl: url });
+  }
+  return parts.length ? parts : '';
+}
+
+/** Extract text (and any images) from a Responses message item's content. */
+function itemContent(item: Record<string, unknown>): string | ContentPart[] {
+  const content = item.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts: ContentPart[] = [];
+  let text = '';
+  for (const raw of content) {
+    const part = raw as Record<string, unknown>;
+    switch (part.type) {
+      case 'input_text':
+      case 'output_text':
+      case 'text':
+        text += String(part.text ?? '');
+        break;
+      case 'input_image': {
+        const mapped = partToContent(part, text);
+        text = '';
+        if (Array.isArray(mapped)) parts.push(...mapped);
+        break;
+      }
+    }
+  }
+  // Pure text collapses to a plain string so it flows through the normalized
+  // pipeline exactly like chat-completions text; only mixed content (images)
+  // stays as structured parts.
+  if (!parts.length) return text;
+  if (text) parts.push({ type: 'text', text });
+  return parts;
+}
+
+/**
+ * Convert Responses `input` items into normalized messages. Consecutive
+ * top-level `function_call` items are merged into a single assistant message
+ * (they belong to one assistant turn); each `function_call_output` becomes the
+ * matching `tool` message.
+ */
+export function responsesInputToMessages(input: unknown[] | undefined): ModelMessage[] {
+  const out: ModelMessage[] = [];
+  let pending: { role: 'assistant'; content: string; toolCalls: ToolCall[] } | null = null;
+  const flush = () => {
+    if (pending) {
+      out.push(pending);
+      pending = null;
+    }
+  };
+
+  for (const raw of input ?? []) {
+    const item = raw as Record<string, unknown>;
+    if (item.type === 'function_call') {
+      const call: ToolCall = {
+        id: String(item.call_id ?? item.id ?? `call_${out.length}`),
+        name: String(item.name ?? 'unknown'),
+        arguments: safeJsonParse<Record<string, unknown>>(String(item.arguments ?? '{}'), {}),
+      };
+      if (pending) pending.toolCalls.push(call);
+      else pending = { role: 'assistant', content: '', toolCalls: [call] };
+      continue;
+    }
+    flush();
+    if (item.type === 'function_call_output') {
+      const output = item.output;
+      out.push({
+        role: 'tool',
+        content: typeof output === 'string' ? output : JSON.stringify(output ?? ''),
+        toolCallId: String(item.call_id ?? ''),
+      });
+      continue;
+    }
+    // Reasoning summaries carry no instruction for the model — drop them.
+    if (item.type === 'reasoning') continue;
+
+    const role = String(item.role ?? 'user');
+    const content = itemContent(item);
+    if (role === 'system') out.push({ role: 'system', content });
+    else if (role === 'assistant') out.push({ role: 'assistant', content });
+    // The normalized `tool` message carries plain text only.
+    else if (role === 'tool') out.push({ role: 'tool', content: serializeText(content), toolCallId: String(item.tool_call_id ?? '') });
+    else out.push({ role: 'user', content });
+  }
+  flush();
+  return out;
+}
+
+function mapResponsesToolChoice(choice: unknown): ToolChoice | undefined {
+  if (choice === 'auto' || choice === 'none' || choice === 'required') return choice;
+  if (choice && typeof choice === 'object') {
+    const c = choice as Record<string, unknown>;
+    if (c.type === 'function' && typeof c.name === 'string') return { type: 'function', name: c.name };
+  }
+  return undefined;
+}
+
+function mapResponsesTextFormat(format: unknown): ResponseFormat | undefined {
+  if (!format || typeof format !== 'object') return undefined;
+  const f = format as Record<string, unknown>;
+  if (f.type === 'json_object') return { type: 'json_object' };
+  if (f.type === 'json_schema') {
+    const schema = (f.schema as Record<string, unknown> | undefined) ?? {};
+    return {
+      type: 'json_schema',
+      name: typeof f.name === 'string' ? f.name : undefined,
+      strict: typeof f.strict === 'boolean' ? f.strict : undefined,
+      schema,
+    };
+  }
+  return undefined;
+}
+
+/** Convert a Responses API request into normalized ChatParams. */
+export function mapResponsesRequest(body: ResponsesRequest, model: string): ChatParams {
+  const messages = responsesInputToMessages(body.input);
+  if (typeof body.instructions === 'string' && body.instructions) {
+    messages.unshift({ role: 'system', content: body.instructions });
+  } else if (Array.isArray(body.instructions)) {
+    const text = body.instructions.map((p) => p.text ?? '').join('\n');
+    if (text) messages.unshift({ role: 'system', content: text });
+  }
+
+  const params: ChatParams = { model, messages };
+  if (Array.isArray(body.tools)) {
+    const tools: ToolDefinition[] = [];
+    for (const t of body.tools) {
+      if (t.name) tools.push({ name: t.name, description: t.description, parameters: t.parameters });
+    }
+    if (tools.length) params.tools = tools;
+  }
+  const toolChoice = mapResponsesToolChoice(body.tool_choice);
+  if (toolChoice) params.toolChoice = toolChoice;
+  const responseFormat = mapResponsesTextFormat(body.text?.format);
+  if (responseFormat) params.responseFormat = responseFormat;
+  if (body.temperature !== undefined) params.temperature = body.temperature;
+  if (body.max_output_tokens !== undefined) params.maxTokens = body.max_output_tokens;
+  if (body.stop !== undefined) params.stop = Array.isArray(body.stop) ? body.stop : [body.stop];
+  return params;
+}
+
+// ---------------------------------------------------------------------------
+// Outbound: normalized result -> Responses API body / SSE events
+// ---------------------------------------------------------------------------
+
+function toResponsesUsage(usage?: Usage): { input_tokens: number; output_tokens: number; total_tokens: number } {
+  return {
+    input_tokens: usage?.inputTokens ?? 0,
+    output_tokens: usage?.outputTokens ?? 0,
+    total_tokens: usage?.totalTokens ?? 0,
+  };
+}
+
+/** Convert a normalized ChatResult into a non-streamed Responses body. */
+export function toResponsesCompletion(result: ChatResult, model: string): Record<string, unknown> {
+  const id = `resp_${randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+  const output: Record<string, unknown>[] = [];
+  const content = serializeText(result.message.content);
+  if (content) {
+    output.push({
+      type: 'message',
+      id: `msg_${randomUUID()}`,
+      status: 'completed',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: content, annotations: [] }],
+    });
+  }
+  if (result.message.role === 'assistant') {
+    for (const tc of result.message.toolCalls ?? []) {
+      output.push({
+        type: 'function_call',
+        id: `fc_${randomUUID()}`,
+        call_id: tc.id,
+        name: tc.name,
+        arguments: JSON.stringify(tc.arguments),
+        ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
+      });
+    }
+  }
+  return {
+    id,
+    object: 'response',
+    created_at: created,
+    status: 'completed',
+    model,
+    output,
+    usage: toResponsesUsage(result.usage),
+  };
+}
+
+/**
+ * Convert a normalized provider event stream into Responses API SSE lines
+ * (`data: {...}\n\n`). Mirrors the event vocabulary emitted by the Zen
+ * /responses endpoint so Codex parses it natively.
+ */
+export async function* toResponsesStreamEvents(
+  events: AsyncIterable<StreamChunk>,
+  model: string,
+): AsyncGenerator<string> {
+  const id = `resp_${randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+  const data = (obj: unknown) => `data: ${JSON.stringify(obj)}\n\n`;
+
+  yield data({
+    type: 'response.created',
+    response: { id, object: 'response', created_at: created, status: 'in_progress', model, output: [] },
+  });
+
+  const output: Array<Record<string, unknown>> = [];
+  let textItem: Record<string, unknown> | null = null;
+  let textPart: Record<string, unknown> | null = null;
+  let toolItem: Record<string, unknown> | null = null;
+  let toolArgs = '';
+  let usage: Usage | undefined;
+
+  const indexOf = (item: Record<string, unknown>) => Math.max(0, output.indexOf(item));
+
+  const completeTextItem = function* (): Generator<string> {
+    if (!textItem) return;
+    const i = indexOf(textItem);
+    yield data({
+      type: 'response.output_text.done',
+      item_id: textItem.id,
+      output_index: i,
+      content_index: 0,
+      text: (textPart?.text as string) ?? '',
+    });
+    textItem.status = 'completed';
+    yield data({ type: 'response.output_item.done', output_index: i, item: textItem });
+    textItem = null;
+    textPart = null;
+  };
+
+  const completeToolItem = function* (): Generator<string> {
+    if (!toolItem) return;
+    toolItem.arguments = toolArgs;
+    toolItem.status = 'completed';
+    yield data({ type: 'response.output_item.done', output_index: indexOf(toolItem), item: toolItem });
+    toolItem = null;
+  };
+
+  try {
+    for await (const event of events) {
+      switch (event.type) {
+        case 'text-delta': {
+          if (!textItem) {
+            textItem = {
+              type: 'message',
+              id: `msg_${randomUUID()}`,
+              status: 'in_progress',
+              role: 'assistant',
+              content: [],
+            };
+            output.push(textItem);
+            yield data({ type: 'response.output_item.added', output_index: output.length - 1, item: textItem });
+            textPart = { type: 'output_text', text: '', annotations: [] };
+            (textItem.content as unknown[]).push(textPart);
+            yield data({
+              type: 'response.content_part.added',
+              item_id: textItem.id,
+              output_index: output.length - 1,
+              content_index: 0,
+              part: textPart,
+            });
+          }
+          textPart!.text = `${textPart!.text as string}${event.text}`;
+          yield data({
+            type: 'response.output_text.delta',
+            item_id: textItem.id,
+            output_index: output.length - 1,
+            content_index: 0,
+            delta: event.text,
+          });
+          break;
+        }
+        case 'tool-call-start': {
+          toolItem = {
+            type: 'function_call',
+            id: `fc_${randomUUID()}`,
+            call_id: event.id,
+            name: event.name,
+            arguments: '',
+            status: 'in_progress',
+            ...(event.thoughtSignature ? { thoughtSignature: event.thoughtSignature } : {}),
+          };
+          toolArgs = '';
+          output.push(toolItem);
+          yield data({ type: 'response.output_item.added', output_index: output.length - 1, item: toolItem });
+          break;
+        }
+        case 'tool-call-args-delta': {
+          toolArgs += event.argsDelta;
+          if (toolItem) {
+            yield data({
+              type: 'response.function_call_arguments.delta',
+              item_id: toolItem.id,
+              output_index: indexOf(toolItem),
+              delta: event.argsDelta,
+            });
+          }
+          break;
+        }
+        case 'tool-call-end':
+          // Completion of the item happens on 'finish' (or stream end).
+          break;
+        case 'finish': {
+          if (event.usage) usage = event.usage;
+          yield* completeTextItem();
+          yield* completeToolItem();
+          break;
+        }
+      }
+    }
+    // Providers may end without an explicit finish chunk — finalize anyway.
+    yield* completeTextItem();
+    yield* completeToolItem();
+  } catch (err) {
+    yield data({
+      type: 'response.failed',
+      response: {
+        id,
+        object: 'response',
+        created_at: created,
+        status: 'failed',
+        model,
+        output,
+        error: { code: 'provider_error', message: (err as Error).message },
+      },
+    });
+    return;
+  }
+
+  yield data({
+    type: 'response.completed',
+    response: {
+      id,
+      object: 'response',
+      created_at: created,
+      status: 'completed',
+      model,
+      output,
+      usage: toResponsesUsage(usage),
+    },
+  });
+}

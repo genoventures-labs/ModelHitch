@@ -12,10 +12,12 @@
  *   $env:OPENCODE_ZEN_API_KEY="opencode-..." ; npm run canary
  *
  * Cases (one real streamed tool call each):
- *   1. big-pickle           -> /chat/completions (OpenAI-compatible)
+ *   1. deepseek-v4-flash  -> /chat/completions (OpenAI-compatible)
  *   2. gpt-5.6-luna         -> /responses        (OpenAI Responses API)
- *   3. claude-sonnet-5      -> /messages         (Anthropic Messages API)
+ *   3. qwen3.6-plus       -> /messages         (Anthropic Messages API)
  *   4. gemini-3.5-flash-lite -> models/{id}:generateContent (Google native)
+ *   5. gpt-5.6-luna via /v1/responses (Codex CLI wire protocol, full bridge)
+ *   6. deepseek-v4-flash via /v1/messages (Claude Code gateway wire protocol)
  *
  * Exits 0 only when every case completes a streamed tool call and then
  * correctly uses the tool result in its final answer.
@@ -66,6 +68,35 @@ const TOOL_DEF = {
   },
 };
 
+/** Responses API tool shape (flat) — what Codex CLI sends to the bridge. */
+const RESPONSES_TOOL_DEF = {
+  type: 'function',
+  name: TOOL_NAME,
+  description:
+    'Fetch the Android SDK configuration (compileSdk, minSdk, targetSdk) for the current project. Call this before suggesting Gradle or manifest changes.',
+  parameters: {
+    type: 'object',
+    properties: {
+      sdkVersion: { type: 'string', description: "The Android SDK API level to inspect, e.g. '36'." },
+    },
+    required: ['sdkVersion'],
+  },
+};
+
+/** Anthropic Messages tool shape — what Claude Code sends to the gateway. */
+const ANTHROPIC_TOOL_DEF = {
+  name: TOOL_NAME,
+  description:
+    'Fetch the Android SDK configuration (compileSdk, minSdk, targetSdk) for the current project. Call this before suggesting Gradle or manifest changes.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      sdkVersion: { type: 'string', description: "The Android SDK API level to inspect, e.g. '36'." },
+    },
+    required: ['sdkVersion'],
+  },
+};
+
 const PROMPT =
   'Act as the Android Studio agent inspecting this project. Before answering anything, you MUST call the ' +
   'get_android_sdk tool with sdkVersion "36". After you receive the tool result, report the compileSdk value in your final answer.';
@@ -77,14 +108,22 @@ function executeTool(name: string, args: Record<string, unknown>): string {
   return JSON.stringify({ compileSdk: 36, minSdk: 24, targetSdk: 36, buildTools: `${sdkVersion}.0.0` });
 }
 
-const CASES: Array<{ label: string; model: string; forceTool: boolean }> = [
-  // big-pickle is a thinking model: it rejects a *forced* tool_choice, so we
+const CASES: Array<{ label: string; model: string; forceTool: boolean; wire?: 'responses' | 'anthropic' }> = [
+  // deepseek is a thinking model: it rejects a *forced* tool_choice, so we
   // rely on the prompt to trigger the call with tool_choice 'auto'.
-  { label: 'chat-completions (/chat/completions)', model: 'big-pickle', forceTool: false },
+  // (big-pickle is currently upstream-rate-limited on this key.)
+  { label: 'chat-completions (/chat/completions)', model: 'deepseek-v4-flash', forceTool: false },
   { label: 'responses (/responses)', model: 'gpt-5.6-luna', forceTool: true },
-  // qwen3.5-plus is disabled on this key; claude-sonnet-5 is probe-verified.
-  { label: 'messages (/messages)', model: 'claude-sonnet-5', forceTool: true },
+  // qwen3.6-plus is probe-verified on this key (all claude-* are currently
+  // disabled at the gateway); like big-pickle it rejects a *forced* tool_choice.
+  { label: 'messages (/messages)', model: 'qwen3.6-plus', forceTool: false },
   { label: 'gemini (:generateContent)', model: 'gemini-3.5-flash-lite', forceTool: true },
+  // Codex CLI speaks ONLY the Responses wire API to custom providers — this
+  // proves the full path: /v1/responses -> bridge -> family router -> Zen.
+  { label: 'responses-wire (/v1/responses)', model: 'gpt-5.6-luna', forceTool: true, wire: 'responses' },
+  // Claude Code speaks the Anthropic Messages wire to any LLM gateway
+  // (ANTHROPIC_BASE_URL) — proves /v1/messages -> bridge -> family router -> Zen.
+  { label: 'anthropic-wire (/v1/messages)', model: 'deepseek-v4-flash', forceTool: false, wire: 'anthropic' },
 ];
 
 async function* ssePayloads(res: Response): AsyncGenerator<string> {
@@ -206,6 +245,195 @@ async function answerWithResult(base: string, model: string, turn: TurnOne, resu
   return data.choices?.[0]?.message?.content ?? '';
 }
 
+/** Turn 1 via the Codex wire: streamed POST /v1/responses (Responses SSE). */
+async function streamResponsesToolCall(
+  base: string,
+  model: string,
+  forceTool: boolean,
+  signal: AbortSignal,
+): Promise<TurnOne> {
+  const res = await fetch(`${base}/v1/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal,
+    body: JSON.stringify({
+      model,
+      stream: true,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: PROMPT }] }],
+      tools: [RESPONSES_TOOL_DEF],
+      tool_choice: forceTool ? { type: 'function', name: TOOL_NAME } : 'auto',
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  }
+  const out: TurnOne = { content: '', toolCalls: [], finishReason: null };
+  const byItem = new Map<string, AccToolCall>();
+  for await (const payload of ssePayloads(res)) {
+    const ev = JSON.parse(payload);
+    if (ev.type === 'response.failed') {
+      throw new Error(`upstream error: ${ev.response?.error?.message ?? JSON.stringify(ev)}`);
+    }
+    if (ev.type === 'response.output_item.added' && ev.item?.type === 'function_call') {
+      const acc: AccToolCall = {
+        id: ev.item.call_id ?? ev.item.id ?? `call_${out.toolCalls.length}`,
+        name: ev.item.name ?? '',
+        args: '',
+        ...(ev.item.thoughtSignature ? { thoughtSignature: ev.item.thoughtSignature } : {}),
+      };
+      byItem.set(ev.item.id, acc);
+      out.toolCalls.push(acc);
+    }
+    if (ev.type === 'response.function_call_arguments.delta') {
+      const acc = byItem.get(ev.item_id);
+      if (acc) acc.args += ev.delta ?? '';
+    }
+    if (ev.type === 'response.output_text.delta') out.content += ev.delta ?? '';
+    if (ev.type === 'response.completed') out.finishReason = 'completed';
+  }
+  return out;
+}
+
+/** Turn 2 via the Codex wire: non-stream /v1/responses with tool result items. */
+async function answerWithResponsesResult(
+  base: string,
+  model: string,
+  turn: TurnOne,
+  result: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const first = turn.toolCalls[0]!;
+  const res = await fetch(`${base}/v1/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal,
+    body: JSON.stringify({
+      model,
+      stream: false,
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: PROMPT }] },
+        {
+          type: 'function_call',
+          call_id: first.id,
+          name: first.name,
+          arguments: first.args || '{}',
+          ...(first.thoughtSignature ? { thoughtSignature: first.thoughtSignature } : {}),
+        },
+        { type: 'function_call_output', call_id: first.id, output: result },
+      ],
+      tools: [RESPONSES_TOOL_DEF],
+      tool_choice: 'none',
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  }
+  const data = await res.json();
+  const text = (data.output ?? [])
+    .filter((o: { type?: string }) => o.type === 'message')
+    .flatMap((o: { content?: Array<{ text?: string }> }) => o.content ?? [])
+    .map((p: { text?: string }) => p.text ?? '')
+    .join('');
+  return text;
+}
+
+/** Turn 1 via the Claude Code wire: streamed POST /v1/messages (Anthropic SSE). */
+async function streamAnthropicToolCall(
+  base: string,
+  model: string,
+  forceTool: boolean,
+  signal: AbortSignal,
+): Promise<TurnOne> {
+  const res = await fetch(`${base}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      Authorization: 'Bearer test-gateway-token',
+    },
+    signal,
+    body: JSON.stringify({
+      model,
+      max_tokens: 4096,
+      stream: true,
+      system: 'You are the Android Studio agent.',
+      messages: [{ role: 'user', content: PROMPT }],
+      tools: [ANTHROPIC_TOOL_DEF],
+      tool_choice: forceTool ? { type: 'tool', name: TOOL_NAME } : { type: 'auto' },
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  }
+  const out: TurnOne = { content: '', toolCalls: [], finishReason: null };
+  const byIndex = new Map<number, AccToolCall>();
+  for await (const payload of ssePayloads(res)) {
+    const ev = JSON.parse(payload);
+    if (ev.type === 'error') throw new Error(`upstream error: ${ev.error?.message ?? JSON.stringify(ev)}`);
+    if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
+      const acc: AccToolCall = { id: ev.content_block.id, name: ev.content_block.name, args: '' };
+      byIndex.set(ev.index, acc);
+      out.toolCalls.push(acc);
+    }
+    if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+      out.content += ev.delta.text ?? '';
+    }
+    if (ev.type === 'content_block_delta' && ev.delta?.type === 'input_json_delta') {
+      const acc = byIndex.get(ev.index);
+      if (acc) acc.args += ev.delta.partial_json ?? '';
+    }
+    if (ev.type === 'message_delta') out.finishReason = ev.delta?.stop_reason ?? null;
+  }
+  return out;
+}
+
+/** Turn 2 via the Claude Code wire: non-stream /v1/messages with tool_result. */
+async function answerWithAnthropicResult(
+  base: string,
+  model: string,
+  turn: TurnOne,
+  result: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const first = turn.toolCalls[0]!;
+  const res = await fetch(`${base}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      Authorization: 'Bearer test-gateway-token',
+    },
+    signal,
+    body: JSON.stringify({
+      model,
+      max_tokens: 4096,
+      stream: false,
+      system: 'You are the Android Studio agent.',
+      messages: [
+        { role: 'user', content: PROMPT },
+        {
+          role: 'assistant',
+          content: [
+            ...(turn.content ? [{ type: 'text', text: turn.content }] : []),
+            { type: 'tool_use', id: first.id, name: first.name, input: JSON.parse(first.args || '{}') },
+          ],
+        },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: first.id, content: result }] },
+      ],
+      tools: [ANTHROPIC_TOOL_DEF],
+      tool_choice: { type: 'none' },
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  }
+  const data = await res.json();
+  return (data.content ?? [])
+    .filter((b: { type?: string }) => b.type === 'text')
+    .map((b: { text?: string }) => b.text ?? '')
+    .join('');
+}
+
 async function main() {
   const server = createModelHitchServer({
     providers: undefined, // built-in set includes opencodeZen
@@ -226,7 +454,12 @@ async function main() {
     const timer = setTimeout(() => controller.abort(), 120_000);
     const signal = controller.signal;
     try {
-      const turn = await streamToolCall(url, c.model, c.forceTool, signal);
+      const turn =
+        c.wire === 'responses'
+          ? await streamResponsesToolCall(url, c.model, c.forceTool, signal)
+          : c.wire === 'anthropic'
+            ? await streamAnthropicToolCall(url, c.model, c.forceTool, signal)
+            : await streamToolCall(url, c.model, c.forceTool, signal);
       if (!turn.toolCalls.length) {
         throw new Error(`no tool call streamed (finish_reason=${turn.finishReason ?? 'none'}; text="${turn.content.slice(0, 80)}")`);
       }
@@ -237,7 +470,12 @@ async function main() {
       // "AS executes tool"
       const result = executeTool(first.name, JSON.parse(first.args || '{}'));
       // Turn 2: "AS sends result back, model answers"
-      const answer = await answerWithResult(url, c.model, turn, result, signal);
+      const answer =
+        c.wire === 'responses'
+          ? await answerWithResponsesResult(url, c.model, turn, result, signal)
+          : c.wire === 'anthropic'
+            ? await answerWithAnthropicResult(url, c.model, turn, result, signal)
+            : await answerWithResult(url, c.model, turn, result, signal);
 
       const routed = zenProtocolForModel(c.model);
       const ok =

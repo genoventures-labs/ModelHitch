@@ -296,9 +296,13 @@ const server = createModelHitchServer({
 const { url } = await server.listen(3939, '127.0.0.1');
 ```
 
-Endpoints: `POST /v1/chat/completions` (stream + non-stream), `GET /v1/models[/:id]`,
-`GET /healthz`. Errors come back in the OpenAI envelope (`{ error: { message, type, code } }`)
-with mapped statuses (401 missing/invalid key, 429 rate limit, 404 model not found, 502 upstream).
+Endpoints: `POST /v1/chat/completions` (stream + non-stream), `POST /v1/responses` (stream +
+non-stream — Codex CLI / Responses-API clients), `POST /v1/messages` (stream + non-stream —
+Claude Code / Anthropic-format gateways, plus `POST /v1/messages/count_tokens`), `GET
+/v1/models[/:id]`, `GET /healthz`. Errors come back in the request's own envelope —
+OpenAI-style (`{ error: { message, type, code } }`) on `/chat/completions` and `/responses`,
+Anthropic-style (`{ type: "error", error: { type, message } }`) on `/v1/messages` — with
+mapped statuses (401 missing/invalid key, 429 rate limit, 404 model not found, 502 upstream).
 
 `tool_choice` and `response_format` are passed through to the underlying provider: OpenAI-style
 values (`auto`/`none`/`required`/`{type:"function",...}`, `json_object`, `json_schema`) are
@@ -309,6 +313,92 @@ JSON system hint, Ollama gets `tool_choice` + `format`, and the mock honors `non
 > models without function-calling training will still emit prose instead of JSON tool calls.
 > Google-specific extras (native AGENTS.md scanning, Gemini Interactions caching, AppFunctions)
 > remain on Studio's first-party path; the bridge covers the BYOK endpoint route.
+
+### Codex CLI as a client
+
+Codex's custom model providers (`model_providers.<id>` in `~/.codex/config.toml`) speak **only**
+the OpenAI *Responses API* (`wire_api = "responses"` is the only supported value), so the bridge
+exposes the same protocol at `POST /v1/responses` — same family routing, tools, multi-turn
+function_call / function_call_output items, and SSE streaming.
+
+1. Start the bridge: `npm run bridge`
+2. Add this to your **user-level** `~/.codex/config.toml` (project-scoped `.codex/config.toml`
+   cannot set `model_providers`):
+
+```toml
+model_provider = "modelhitch"
+model = "opencode-zen/gpt-5.6-luna"   # any id from GET /v1/models
+
+[model_providers.modelhitch]
+name = "ModelHitch (OpenCode Zen via local bridge)"
+base_url = "http://127.0.0.1:3939/v1"   # Codex appends /responses and /models
+```
+
+3. Run `codex`. Model ids from `GET /v1/models` work as-is (`opencode-zen/...`, `opencode-go/...`,
+   bare ids for the default provider); each request is routed by family
+   (`gpt-*/grok-*` → `/responses`, `claude-*/qwen*` → `/messages`, `gemini-*` → Google native,
+   everything else → `/chat/completions`).
+
+Notes:
+
+- **Don't set `env_key`** — the bridge resolves keys locally (`apiKeys` → `KeyStore` → env var),
+  so Codex sends no key at all. `experimental_bearer_token` is only needed if you want Codex to
+  present one (any value is accepted and ignored).
+- There's no `wire_api` line above because `responses` is the default; you can write
+  `wire_api = "responses"` explicitly for clarity.
+- `openai_base_url` is *not* used here — that only redirects the built-in `openai` provider, and
+  custom providers are more flexible (no OpenAI auth assumptions).
+- To flip back to OpenAI models, wrap the block in a profile:
+  `~/.codex/modelhitch.config.toml` + `codex --profile modelhitch`.
+- Responses-only knobs (`model_reasoning_effort`, `model_verbosity`, ...) are accepted but
+  ignored; unsupported request fields are dropped by the bridge before routing.
+
+See `examples/codex.config.toml` for a copy-paste template.
+
+### Claude Code as a client
+
+Claude Code talks to any LLM **gateway** through the Anthropic *Messages API*: set
+`ANTHROPIC_BASE_URL` to a custom base URL and Claude Code treats it as an Anthropic-format
+endpoint, passing **any** model id through unchecked (model-name validation only runs against
+the real Anthropic API). The bridge exposes that wire at `POST /v1/messages`, so Claude Code
+gets the same family routing, tools, multi-turn `tool_use` / `tool_result` blocks, and SSE
+streaming as every other client.
+
+1. Start the bridge: `npm run bridge`
+2. Export the gateway env vars in your shell (Claude Code reads these):
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:3939"     # no /v1 — Claude Code appends /v1/messages
+export ANTHROPIC_AUTH_TOKEN="local-bridge"            # any dummy value — the bridge resolves keys itself
+export ANTHROPIC_DEFAULT_SONNET_MODEL="deepseek-v4-flash"   # or any id from GET /v1/models
+```
+
+3. Run `claude`. Each request is routed by family (`gpt-*/grok-*` → `/responses`,
+   `claude-*/qwen*` → `/messages`, `gemini-*` → Google native, everything else →
+   `/chat/completions`); `--model`, `ANTHROPIC_MODEL`, and the
+   `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL` aliases all work as model pins.
+
+Notes:
+
+- **Always stream** — the gateway contract requires inference responses to be streamed as
+  Anthropic SSE events (`message_start` → `content_block_*` → `message_delta` → `message_stop`,
+  with keep-alive `ping` events while the upstream model thinks). Non-stream works for curl but
+  Claude Code always streams.
+- **Don't set `ANTHROPIC_API_KEY`** — the bridge resolves keys locally (`apiKeys` → `KeyStore`
+  → env var), so `ANTHROPIC_AUTH_TOKEN` just needs to be *present* (any value) to stop Claude
+  Code from opening its claude.ai login flow.
+- Claude Code's extras are stripped before routing: `thinking` (it sends
+  `{type: "adaptive"}` for unknown gateway model names — upstream non-Anthropic models 400 on
+  it), `context_management`, `output_config`, `metadata`, and the `anthropic-beta` header are
+  all ignored, never rejected.
+- `tool_use` blocks carry `input` as a JSON **object** (not a string); the bridge converts to
+  the per-provider shape and back.
+- **Model discovery is optional** (off by default — needs
+  `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) and Claude Code only keeps discovery results
+  whose id contains `claude`/`anthropic`, so it's simplest to pin models with
+  `ANTHROPIC_DEFAULT_*_MODEL` / `--model` as above.
+- `POST /v1/messages/count_tokens` is served with a cheap char-count estimate, so Claude Code
+  never has to fall back to a counting inference call.
 
 ## Development
 
@@ -328,6 +418,8 @@ npm run canary      # end-to-end tool-call test through the bridge (needs a Zen 
 * ~~Native Zen adapters for `/responses` (GPT family) and `/messages` (Claude family) routing~~ ✅ done
 * ~~`tool_choice` / `response_format` passthrough on the bridge~~ ✅ done
 * ~~Gemini native adapter for Zen (`gemini-*` models)~~ ✅ done
+* ~~Codex CLI wire protocol (`/v1/responses`) on the bridge~~ ✅ done
+* ~~Claude Code gateway wire protocol (`/v1/messages`) on the bridge~~ ✅ done
 * Streaming tool-call chaining helper
 * Usage/cost tracking hooks
 * React hooks (`useChat`, `useStream`) for the BYOK UI

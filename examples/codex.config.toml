@@ -1,0 +1,36 @@
+# Codex CLI -> ModelHitch bridge
+#
+# Codex custom model providers speak ONLY the OpenAI *Responses API*
+# (wire_api = "responses" is the only supported value, and the default), so the
+# bridge exposes the same protocol at POST /v1/responses.
+#
+# Setup:
+#   1. Start the bridge:   npm run bridge        (http://127.0.0.1:3939)
+#   2. Copy the [model_providers.modelhitch] block into your USER-level config:
+#        - macOS/Linux: ~/.codex/config.toml
+#        - Windows:     %USERPROFILE%\.codex\config.toml
+#      (Project-scoped .codex/config.toml files CANNOT set model_providers.)
+#   3. Run: codex
+#
+# Tip: wrap everything in a profile file (~/.codex/modelhitch.config.toml) and
+# launch with `codex --profile modelhitch` so you can flip back to OpenAI models
+# without editing your main config.
+
+model_provider = "modelhitch"
+
+# Any model id advertised by GET /v1/models works. Bare ids go to the default
+# provider; provider-prefixed ids route explicitly (opencode-zen/..., opencode-go/...).
+model = "opencode-zen/gpt-5.6-luna"
+
+[model_providers.modelhitch]
+name = "ModelHitch (OpenCode Zen via local bridge)"
+# Codex appends /responses and /models to this base URL.
+base_url = "http://127.0.0.1:3939/v1"
+
+# "responses" is the only supported wire_api value — and the default — so it can
+# be omitted; write it explicitly for clarity if you like:
+# wire_api = "responses"
+
+# Do NOT set env_key: the bridge resolves provider keys locally (apiKeys ->
+# KeyStore -> env var) and never sends them anywhere. Without env_key Codex
+# simply sends no Authorization header.
