@@ -4,3 +4,7 @@ coverage/
 *.log
 .DS_Store
 .env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

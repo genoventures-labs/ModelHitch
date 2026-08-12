@@ -19,13 +19,13 @@
  *   https://opencode.ai/docs/go#usage-limits.
  * - Usage telemetry: GET /v1/usage (JSON) or open /usage in a browser for a
  *   live dashboard — tokens, estimated spend, and how close you are to the
- *   Go 5h/$12, 7d/$30, 30d/$60 usage limits.
+ *   Go 5h/$12, 7d/$30, 30d/$60 usage limits. History is persisted to
+ *   SQLite (./modelhitch-usage.db) and survives restarts.
  */
 import {
   createModelHitchServer,
   OPENCODE_GO_MODELS,
   OPENCODE_ZEN_MODELS,
-  UsageTracker,
 } from '../src/index.js';
 
 const PORT = Number(process.env.MODELHITCH_PORT ?? 3939);
@@ -33,7 +33,6 @@ const HOST = '127.0.0.1';
 const MAX_BODY_BYTES = Number(process.env.MODELHITCH_MAX_BODY_BYTES ?? 64 * 1024 * 1024);
 
 async function main() {
-  const usage = new UsageTracker();
   const server = createModelHitchServer({
     defaultProviderId: 'opencode-zen',
     staticModels: {
@@ -42,7 +41,7 @@ async function main() {
     },
     maxBodyBytes: MAX_BODY_BYTES,
     autoMode: true,
-    usageTracker: usage,
+    usagePersistence: true,
     logger: (line) => console.log(line),
     onFailover: (event) =>
       console.log(
@@ -69,9 +68,10 @@ auto-mode: ON — 429/5xx/network failures fail over to
   opencode-go/deepseek-v4-flash -> opencode-zen/big-pickle ->
   opencode-zen/deepseek-v4-flash-free -> opencode-zen/mimo-v2.5-free
 
-Usage telemetry:
+Usage telemetry (persisted to ./modelhitch-usage.db):
   JSON:       curl ${url}/v1/usage
   Dashboard:  open ${url}/usage in a browser
+  Reset:      curl -X POST ${url}/v1/usage/reset
 
 Quick smoke test (streaming):
   curl -N ${url}/v1/chat/completions ^

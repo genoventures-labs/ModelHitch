@@ -18,6 +18,7 @@ import {
   type FailoverTarget,
 } from '../core/failover.js';
 import { UsageTracker, usageDashboardHtml, type UsageEvent } from '../core/usage.js';
+import { SqliteUsageStorage } from '../core/usage-storage.js';
 import { mapFinishReasonOpenAI, mapRequest, routeModel, toChatCompletion, toOpenAIError, toUsageOutput } from './mapping.js';
 import {
   estimateAnthropicInputTokens,
@@ -93,6 +94,13 @@ export interface ModelHitchServerOptions {
    * internal in-memory tracker.
    */
   usageTracker?: UsageTracker;
+  /**
+   * Persist usage + failover history to SQLite so it survives restarts.
+   * `true` writes to `modelhitch-usage.db` in the working directory; a string
+   * is a custom file path (parent directories are created). Requires Node
+   * >= 22.5 (`node:sqlite`). Ignored when `usageTracker` is provided.
+   */
+  usagePersistence?: boolean | string;
 }
 
 /** One completed inference request, as reported to the `onUsage` hook. */
@@ -135,11 +143,21 @@ export class OpenAICompatibleServer {
   readonly options: ModelHitchServerOptions;
   private httpServer: Server | null = null;
   private usageTracker: UsageTracker;
+  private ownsUsageTracker = false;
 
   constructor(options: ModelHitchServerOptions = {}) {
     this.options = options;
     this.providers = options.providers ?? defaultProviders;
-    this.usageTracker = options.usageTracker ?? new UsageTracker();
+    if (options.usageTracker) {
+      this.usageTracker = options.usageTracker;
+    } else if (options.usagePersistence) {
+      const file = typeof options.usagePersistence === 'string' ? options.usagePersistence : undefined;
+      this.usageTracker = new UsageTracker(new SqliteUsageStorage(file));
+      this.ownsUsageTracker = true;
+      this.log(`usage persistence: SQLite (${file ?? 'modelhitch-usage.db'})`);
+    } else {
+      this.usageTracker = new UsageTracker();
+    }
   }
 
   /** Start listening. `port` defaults to 0 (ephemeral). */
@@ -158,9 +176,13 @@ export class OpenAICompatibleServer {
     });
   }
 
-  /** Stop the server. */
+  /** Stop the server (also closes an internally-created usage tracker). */
   close(): Promise<void> {
     clearConversations();
+    if (this.ownsUsageTracker) {
+      this.usageTracker.close();
+      this.ownsUsageTracker = false;
+    }
     return new Promise((resolve, reject) => {
       if (!this.httpServer) return resolve();
       this.httpServer.close((err) => (err ? reject(err) : resolve()));

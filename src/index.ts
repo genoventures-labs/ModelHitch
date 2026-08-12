@@ -29,6 +29,7 @@ export {
   type FailoverErrorInfo,
 } from './core/failover.js';
 export { UsageTracker, usageDashboardHtml } from './core/usage.js';
+export { SqliteUsageStorage, type UsageStorage } from './core/usage-storage.js';
 export type {
   UsageEvent,
   UsageSnapshot,

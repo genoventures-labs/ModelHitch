@@ -378,6 +378,8 @@ curl http://127.0.0.1:3939/v1/usage
 
 ```jsonc
 {
+  "since": "2026-08-11T10:00:00.000Z",
+  "persisted": true,
   "totals": { "requests": 42, "inputTokens": 120000, "outputTokens": 34000, "totalTokens": 154000, "costUsd": 1.83, "latencyMs": 98123 },
   "perProvider": { "opencode-zen": { /* totals scoped to this provider */ } },
   "perModel": { "opencode-zen/big-pickle": { /* totals scoped to this model */ } },
@@ -399,9 +401,9 @@ bridge is to a paid-limit block. Cost estimates come from built-in list pricing
 Track usage programmatically with the `UsageTracker` class:
 
 ```ts
-import { UsageTracker } from 'modelhitch';
+import { UsageTracker, SqliteUsageStorage } from 'modelhitch';
 
-const usage = new UsageTracker();
+const usage = new UsageTracker(new SqliteUsageStorage('./data/usage.db'));
 const server = createModelHitchServer({
   usageTracker: usage,
   onUsage: (event) => myMeteringDb.record(event), // every completed request
@@ -410,7 +412,29 @@ const server = createModelHitchServer({
 console.log(usage.snapshot().totals.costUsd);
 ```
 
-Totals are in-memory and reset when the bridge restarts.
+### Persistence (SQLite)
+
+Usage history lives in memory by default, which means totals reset on restart. For
+spend tracking that survives restarts, hand the bridge a SQLite file — **no native
+dependencies**, it's built on Node's `node:sqlite` (requires Node ≥ 22.5):
+
+```ts
+const server = createModelHitchServer({
+  // true → ./modelhitch-usage.db · string → custom path (dirs are created)
+  usagePersistence: true, // or './data/usage.db'
+});
+```
+
+Every request and failover is mirrored into the database, and on startup the tracker
+loads the full history back — totals, per-provider/model/wire breakdowns, and the
+5h/7d/30d windows all include pre-restart usage, and `since` reflects the earliest
+recorded event. `GET /v1/usage` reports `"persisted": true` and the dashboard shows
+a *persisted to SQLite* badge. `POST /v1/usage/reset` clears memory and the file.
+
+The same storage works standalone (`SqliteUsageStorage`, exported from `modelhitch`)
+— useful for metering outside the bridge. If `usageTracker` is passed, `usagePersistence`
+is ignored; if you enable persistence on Node < 22.5, the server logs a clear error at
+startup rather than silently dropping history.
 
 ## Errors and usage
 

@@ -1,4 +1,5 @@
 import type { FailoverEvent } from './failover.js';
+import type { UsageStorage } from './usage-storage.js';
 
 /**
  * Usage tracking for dashboards and rate-limit accounting.
@@ -51,6 +52,8 @@ export interface UsageWindow extends UsageTotals {
 export interface UsageSnapshot {
   /** ISO timestamp of the first recorded event (or tracker creation). */
   since: string;
+  /** True when history is persisted (SQLite) and survives restarts. */
+  persisted: boolean;
   totals: UsageTotals;
   perProvider: Record<string, UsageTotals>;
   /** Keyed by `providerId/model`. */
@@ -70,12 +73,33 @@ export class UsageTracker {
   private events: UsageEvent[] = [];
   private failoverEvents: FailoverEvent[] = [];
   private since = new Date();
+  private readonly storage?: UsageStorage;
+
+  /**
+   * @param storage Optional durable sink. When provided, history is loaded on
+   *   construction and mirrored on every record, so it survives restarts.
+   */
+  constructor(storage?: UsageStorage) {
+    this.storage = storage;
+    if (storage) {
+      const loaded = storage.load();
+      this.events = loaded.events.slice(-MAX_EVENTS);
+      this.failoverEvents = loaded.failovers.slice(-MAX_FAILOVERS);
+      this.since = this.events.length > 0 ? new Date(this.events[0]!.at) : new Date();
+    }
+  }
+
+  /** True when history is persisted (SQLite) and survives restarts. */
+  get persisted(): boolean {
+    return this.storage != null;
+  }
 
   record(event: UsageEvent): void {
     this.events.push(event);
     if (this.events.length > MAX_EVENTS) {
       this.events.splice(0, this.events.length - MAX_EVENTS);
     }
+    this.storage?.append(event);
   }
 
   recordFailover(event: FailoverEvent): void {
@@ -83,12 +107,19 @@ export class UsageTracker {
     if (this.failoverEvents.length > MAX_FAILOVERS) {
       this.failoverEvents.splice(0, this.failoverEvents.length - MAX_FAILOVERS);
     }
+    this.storage?.appendFailover(event);
   }
 
   reset(): void {
     this.events = [];
     this.failoverEvents = [];
     this.since = new Date();
+    this.storage?.clear();
+  }
+
+  /** Close the backing storage (no-op for in-memory trackers). */
+  close(): void {
+    this.storage?.close();
   }
 
   totals(events: readonly UsageEvent[] = this.events): UsageTotals {
@@ -131,6 +162,7 @@ export class UsageTracker {
   snapshot(): UsageSnapshot {
     return {
       since: this.since.toISOString(),
+      persisted: this.persisted,
       totals: this.totals(),
       perProvider: this.group((e) => e.providerId),
       perModel: this.group((e) => `${e.providerId}/${e.model}`),
@@ -190,7 +222,7 @@ export function usageDashboardHtml(): string {
 </head>
 <body>
   <h1>ModelHitch usage</h1>
-  <div class="sub">live bridge telemetry · <span id="since">—</span> · auto-refreshes</div>
+  <div class="sub">live bridge telemetry · <span id="since">—</span> · auto-refreshes<span id="persist" style="display:none"> · persisted to SQLite</span></div>
   <div id="err"></div>
   <div id="app">loading…</div>
 <script>
@@ -202,6 +234,7 @@ async function tick() {
     const t = await (await fetch('/v1/usage')).json();
     document.getElementById('err').style.display = 'none';
     document.getElementById('since').textContent = 'since ' + new Date(t.since).toLocaleString();
+    document.getElementById('persist').style.display = t.persisted ? '' : 'none';
     const winLabels = {'5h':'5 hours ($12 cap)','7d':'7 days ($30 cap)','30d':'30 days ($60 cap)'};
     const wins = Object.keys(winLabels).map((k) => {
       const w = t.windows[k];
