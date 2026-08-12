@@ -93,6 +93,23 @@ import { printAsciiLogo } from 'modelhitch';
 printAsciiLogo(); // the chain-link mark + "hitch" wordmark
 ```
 
+### Run the bridge in the background
+
+Don't want the bridge to tie up a terminal? Launch it detached — it keeps
+running after the terminal closes:
+
+```bash
+modelhitch bridge --background   # launch, then the terminal is free
+modelhitch status                # is it running? pid, healthz, log path
+modelhitch stop                  # stop the background bridge
+modelhitch front                 # stop it and run the bridge in this terminal
+```
+
+The background process is tracked per-user in `~/.modelhitch/`
+(`bridge.pid` + `bridge.log`, override the directory with `MODELHITCH_HOME`).
+Run `modelhitch status` to see whether it's alive and responding, or `front`
+to pull it back into a terminal where you can watch logs and hit Ctrl+C.
+
 ## Providers
 
 ModelHitch ships with hosted, local, and deterministic providers:

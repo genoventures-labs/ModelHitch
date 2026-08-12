@@ -4,6 +4,10 @@
  *
  *   modelhitch            print the logo, version, and command help
  *   modelhitch bridge     start the local OpenAI-compatible bridge server
+ *   modelhitch bridge --background  start it as a background process (pid in ~/.modelhitch)
+ *   modelhitch status     is a background bridge running?
+ *   modelhitch front      stop the background one and run the bridge in this terminal
+ *   modelhitch stop       stop the background bridge
  *   modelhitch --version  print the version
  *   modelhitch --help     print help
  *
@@ -11,11 +15,20 @@
  *   MODELHITCH_PORT       bridge port (default 3939)
  *   MODELHITCH_HOST       bridge host (default 127.0.0.1)
  *   MODELHITCH_MAX_BODY_BYTES  max request body for the bridge (default 64 MiB)
+ *   MODELHITCH_HOME       directory for the background pid/log (default ~/.modelhitch)
  */
 import { readFileSync } from 'node:fs';
 import { printAsciiLogo } from './ascii.js';
 import { createModelHitchServer } from './server/server.js';
 import { OPENCODE_GO_MODELS, OPENCODE_ZEN_MODELS } from './providers/opencode.js';
+import {
+  clearPid,
+  daemonStatus,
+  readPid,
+  spawnBackground,
+  stopBackground,
+  waitForReady,
+} from './daemon.js';
 
 const VERSION = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -28,8 +41,15 @@ function usage(): void {
 Usage:
   modelhitch                print the logo, version, and this help
   modelhitch bridge         start the local OpenAI-compatible bridge server
+  modelhitch bridge --background   start it in the background (terminal stays free)
+  modelhitch status         is a background bridge running?
+  modelhitch front          stop the background one, run the bridge in this terminal
+  modelhitch stop           stop the background bridge
   modelhitch --version      print the version
   modelhitch --help         print this help
+
+Background process:
+  tracked in ~/.modelhitch (bridge.pid + bridge.log, override with MODELHITCH_HOME)
 
 Bridge environment:
   MODELHITCH_PORT           port (default 3939)
@@ -85,9 +105,89 @@ Usage telemetry (persisted to ./modelhitch-usage.db):
 Press Ctrl+C to stop.`);
 }
 
+async function runBackgroundBridge(): Promise<void> {
+  const spawned = spawnBackground(['bridge']);
+  const port = Number(process.env.MODELHITCH_PORT ?? 3939);
+  const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
+
+  if (spawned.alreadyRunning) {
+    console.log(`A background bridge is already running (pid ${spawned.pid}).`);
+    console.log(`  status:  modelhitch status`);
+    console.log(`  front:   modelhitch front  (stop it and run it here)`);
+    console.log(`  stop:    modelhitch stop`);
+    return;
+  }
+
+  console.log(`Launched the bridge in the background (pid ${spawned.pid}).`);
+  const ready = await waitForReady(port, host, 8000);
+  console.log(
+    ready
+      ? `  responding on http://${host}:${port} — your terminal is free.`
+      : `  not responding yet — check the log:`,
+  );
+  console.log(`  log:     ${spawned.logPath}`);
+  console.log(`  status:  modelhitch status`);
+  console.log(`  stop:    modelhitch stop`);
+  console.log(`  front:   modelhitch front  (stop it and run it here)`);
+}
+
+async function runStatus(): Promise<void> {
+  const status = daemonStatus();
+  const port = Number(process.env.MODELHITCH_PORT ?? 3939);
+  const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
+
+  if (!status.running || status.pid === null) {
+    if (readPid() !== null) {
+      clearPid();
+      console.log('modelhitch status: not running (stale pid file cleaned up)');
+    } else {
+      console.log('modelhitch status: not running');
+    }
+    console.log('  start it with:  modelhitch bridge --background');
+    return;
+  }
+
+  let health = 'no';
+  try {
+    const res = await fetch(`http://${host}:${port}/healthz`, { signal: AbortSignal.timeout(1200) });
+    health = res.ok ? `yes — responding on http://${host}:${port}` : 'no';
+  } catch {
+    /* not responding */
+  }
+  console.log('modelhitch status: running');
+  console.log(`  pid:      ${status.pid}`);
+  console.log(`  healthz:  ${health}`);
+  console.log(`  log:      ${status.logPath}`);
+}
+
+async function runFront(): Promise<void> {
+  const status = daemonStatus();
+  if (status.running && status.pid !== null) {
+    await stopBackground();
+    console.log(`Stopped the background bridge (pid ${status.pid}) — running it here instead.\n`);
+  } else if (readPid() !== null) {
+    clearPid();
+  }
+  await runBridge();
+}
+
+async function runStop(): Promise<void> {
+  const status = daemonStatus();
+  if (status.running && status.pid !== null) {
+    await stopBackground();
+    console.log(`Stopped the background bridge (pid ${status.pid}).`);
+  } else if (readPid() !== null) {
+    clearPid();
+    console.log('No background bridge was running (stale pid file cleaned up).');
+  } else {
+    console.log('No background bridge is running.');
+  }
+}
+
 async function main(): Promise<void> {
   printAsciiLogo();
-  const [cmd] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const [cmd] = args;
   switch (cmd) {
     case undefined:
     case '-h':
@@ -99,7 +199,20 @@ async function main(): Promise<void> {
       console.log(VERSION);
       break;
     case 'bridge':
-      await runBridge();
+      if (args.includes('--background') || args.includes('-b')) {
+        await runBackgroundBridge();
+      } else {
+        await runBridge();
+      }
+      break;
+    case 'status':
+      await runStatus();
+      break;
+    case 'front':
+      await runFront();
+      break;
+    case 'stop':
+      await runStop();
       break;
     default:
       console.log(`Unknown command: ${cmd}\n`);
