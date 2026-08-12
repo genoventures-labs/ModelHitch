@@ -59,6 +59,12 @@ the current repository, `--dry-run` to preview paths, or `--force` to update an 
 | **Claude Code / Claude.ai** | [Skill guide](./.claude/skills/README.md) | `npx modelhitch setup claude` |
 | **Cursor** | [Plugin guide](./.cursor-plugin/README.md) | `npx modelhitch setup cursor` |
 | **VS Code / GitHub Copilot** | [Plugin guide](./.github/plugin/README.md) | `npx modelhitch setup vscode` |
+| Agent | Get it | Install or use |
+| --- | --- | --- |
+| **Codex** | [Plugin guide](./.agents/plugins/README.md) | `codex plugin marketplace add genoventures-labs/ModelHitch` → `codex plugin add modelhitch@modelhitch` |
+| **Claude Code / Claude.ai** | [Skill guide](./.claude/skills/README.md) | Auto-discovered in this repo; copy or upload [`modelhitch-integrate`](./.claude/skills/modelhitch-integrate/SKILL.md) and [`modelhitch-bridge`](./.claude/skills/modelhitch-bridge/SKILL.md) elsewhere |
+| **Cursor** | [Plugin guide](./.cursor-plugin/README.md) | Marketplace-ready; locally load [`plugins/modelhitch`](./plugins/modelhitch/README.md) |
+| **VS Code / GitHub Copilot** | [Plugin guide](./.github/plugin/README.md) | `copilot plugin marketplace add genoventures-labs/ModelHitch` → `copilot plugin install modelhitch@modelhitch` |
 
 The shared distributable package lives at [`plugins/modelhitch/`](./plugins/modelhitch/README.md).
 It contains separate Codex and Cursor presentation manifests plus the portable Agent Plugins 1.0
