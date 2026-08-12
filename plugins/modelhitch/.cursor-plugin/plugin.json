@@ -1,0 +1,14 @@
+{
+  "name": "modelhitch",
+  "displayName": "ModelHitch",
+  "version": "0.10.0",
+  "description": "Build and operate BYOK, multi-provider AI applications with ModelHitch.",
+  "author": {
+    "name": "Geno Ventures Labs"
+  },
+  "homepage": "https://github.com/genoventures-labs/ModelHitch#readme",
+  "repository": "https://github.com/genoventures-labs/ModelHitch",
+  "license": "MIT",
+  "keywords": ["ai", "llm", "byok", "providers", "bridge"],
+  "skills": "./skills/"
+}

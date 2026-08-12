@@ -11,6 +11,7 @@
   <a href="#quickstart">Quickstart</a> ·
   <a href="#codex-plugin">Codex plugin</a> ·
   <a href="#claude-skills">Claude skills</a> ·
+  <a href="#cursor-plugin">Cursor plugin</a> ·
   <a href="#providers">Providers</a> ·
   <a href="#cli">CLI</a> ·
   <a href="#agent-bridge">Agent bridge</a> ·
@@ -101,6 +102,17 @@ Claude Code discovers them automatically when working in this repository. To use
 project, copy either skill directory into that project's `.claude/skills/` directory or into
 `~/.claude/skills/` for personal use. Each directory follows the portable Agent Skills format and
 can be zipped individually for upload to Claude.ai.
+
+## Cursor plugin
+
+The same ModelHitch skill is packaged for Cursor under `plugins/modelhitch/`, alongside the Codex
+manifest. The repository includes `.cursor-plugin/marketplace.json` and is ready for Cursor
+Marketplace submission.
+
+For local testing before the marketplace listing is approved, copy `plugins/modelhitch/` to
+`~/.cursor/plugins/local/modelhitch`, then restart Cursor or run **Developer: Reload Window**.
+The plugin teaches Cursor to integrate the npm and React APIs, configure the local bridge, add
+providers, and diagnose routing, failover, and usage.
 
 ## CLI
 
