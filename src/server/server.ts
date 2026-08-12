@@ -163,11 +163,14 @@ export class OpenAICompatibleServer {
   /** Start listening. `port` defaults to 0 (ephemeral). */
   listen(port = 0, host = '127.0.0.1'): Promise<{ server: Server; port: number; url: string }> {
     if (this.httpServer) return Promise.reject(new Error('Server is already listening.'));
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
         this.dispatch(req, res).catch((err) => this.sendError(res, err));
       });
+      server.once('error', reject);
       server.listen(port, host, () => {
+        server.removeListener('error', reject);
+        server.on('error', (err) => this.log(`server error: ${String(err)}`));
         this.httpServer = server;
         const actual = (server.address() as AddressInfo).port;
         const url = `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${actual}`;

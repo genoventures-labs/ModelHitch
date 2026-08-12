@@ -8,6 +8,7 @@ import {
   isRunning,
   logFilePath,
   pidFilePath,
+  probeBridge,
   readPid,
   writePid,
 } from '../src/daemon.js';
@@ -68,5 +69,12 @@ describe('daemon status', () => {
     expect(status.pid).toBeNull();
     expect(status.pidPath).toBe(join(home, 'bridge.pid'));
     expect(status.logPath).toBe(join(home, 'bridge.log'));
+  });
+});
+
+describe('bridge probe', () => {
+  it('reports an unused port as not responding', async () => {
+    const probe = await probeBridge(1, '127.0.0.1');
+    expect(probe.responding).toBe(false);
   });
 });

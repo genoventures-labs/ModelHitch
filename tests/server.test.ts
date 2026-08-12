@@ -215,6 +215,15 @@ describe('bridge health', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: 'ok' });
   });
+
+  it('rejects cleanly when the listen address is already occupied', async () => {
+    const first = createModelHitchServer();
+    const second = createModelHitchServer();
+    const listening = await first.listen(0, '127.0.0.1');
+    await expect(second.listen(listening.port, '127.0.0.1')).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    await first.close();
+    await second.close();
+  });
 });
 
 describe('bridge onUsage hook', () => {

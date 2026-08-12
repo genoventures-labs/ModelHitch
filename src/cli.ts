@@ -26,6 +26,8 @@ import { installSkills, SETUP_TARGETS, type SetupTarget } from './skill-installe
 import {
   clearPid,
   daemonStatus,
+  isRunning,
+  probeBridge,
   readPid,
   spawnBackground,
   stopBackground,
@@ -116,9 +118,20 @@ Press Ctrl+C to stop.`);
 }
 
 async function runBackgroundBridge(): Promise<void> {
-  const spawned = spawnBackground(['bridge']);
   const port = Number(process.env.MODELHITCH_PORT ?? 3939);
   const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
+  const tracked = daemonStatus();
+
+  if (!tracked.running) {
+    const existing = await probeBridge(port, host);
+    if (existing.responding) {
+      console.log(`A bridge is already responding on ${existing.url}, but it is not tracked by this CLI.`);
+      console.log('  Leave it running, or stop that process before starting a managed background bridge.');
+      return;
+    }
+  }
+
+  const spawned = spawnBackground(['bridge']);
 
   if (spawned.alreadyRunning) {
     console.log(`A background bridge is already running (pid ${spawned.pid}).`);
@@ -129,11 +142,14 @@ async function runBackgroundBridge(): Promise<void> {
   }
 
   console.log(`Launched the bridge in the background (pid ${spawned.pid}).`);
-  const ready = await waitForReady(port, host, 8000);
+  const ready = await waitForReady(port, host, 8000, spawned.pid);
+  if (!ready && !isRunning(spawned.pid)) clearPid();
   console.log(
     ready
       ? `  responding on http://${host}:${port} — your terminal is free.`
-      : `  not responding yet — check the log:`,
+      : !isRunning(spawned.pid)
+        ? `  process exited before becoming ready — check the log:`
+        : `  not responding yet — check the log:`,
   );
   console.log(`  log:     ${spawned.logPath}`);
   console.log(`  status:  modelhitch status`);
@@ -147,12 +163,18 @@ async function runStatus(): Promise<void> {
   const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
 
   if (!status.running || status.pid === null) {
+    const existing = await probeBridge(port, host);
     if (readPid() !== null) {
       clearPid();
-      console.log('modelhitch status: not running (stale pid file cleaned up)');
-    } else {
-      console.log('modelhitch status: not running');
+      console.log('modelhitch status: tracked process stopped (stale pid file cleaned up)');
     }
+    if (existing.responding) {
+      console.log('modelhitch status: responding (untracked process)');
+      console.log(`  healthz:  yes — responding on ${existing.url}`);
+      console.log('  stop:     stop the owning process; this CLI will not kill an untracked PID');
+      return;
+    }
+    console.log('modelhitch status: not running');
     console.log('  start it with:  modelhitch bridge --background');
     return;
   }

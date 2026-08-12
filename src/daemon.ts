@@ -73,10 +73,26 @@ export interface DaemonStatus {
   pidPath: string;
 }
 
+export interface BridgeProbe {
+  responding: boolean;
+  url: string;
+}
+
 export function daemonStatus(): DaemonStatus {
   const pid = readPid();
   const running = pid !== null && isRunning(pid);
   return { running, pid: running ? pid : null, logPath: logFilePath(), pidPath: pidFilePath() };
+}
+
+/** Probe the configured bridge address, including instances not tracked by our PID file. */
+export async function probeBridge(port: number, host: string): Promise<BridgeProbe> {
+  const url = `http://${host}:${port}`;
+  try {
+    const res = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(800) });
+    return { responding: res.ok, url };
+  } catch {
+    return { responding: false, url };
+  }
 }
 
 /** Path to the script we're currently running as. */
@@ -156,10 +172,16 @@ export async function stopBackground(): Promise<{ stopped: boolean; pid: number 
 }
 
 /** Poll /healthz until the bridge responds (or the timeout elapses). */
-export async function waitForReady(port: number, host: string, timeoutMs: number): Promise<boolean> {
+export async function waitForReady(
+  port: number,
+  host: string,
+  timeoutMs: number,
+  pid?: number,
+): Promise<boolean> {
   const url = `http://${host}:${port}/healthz`;
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
+    if (pid !== undefined && !isRunning(pid)) return false;
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(800) });
       if (res.ok) return true;
