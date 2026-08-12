@@ -46,9 +46,10 @@
     "bridge": "tsx examples/studio-bridge.ts",
     "canary": "tsx examples/canary.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
-    "release": "npm version patch && npm publish && git push origin main --tags",
-    "release:minor": "npm version minor && npm publish && git push origin main --tags",
-    "release:major": "npm version major && npm publish && git push origin main --tags"
+    "gh-release": "node scripts/gh-release.mjs",
+    "release": "npm version patch && npm publish && git push origin main --tags && npm run gh-release",
+    "release:minor": "npm version minor && npm publish && git push origin main --tags && npm run gh-release",
+    "release:major": "npm version major && npm publish && git push origin main --tags && npm run gh-release"
   },
   "keywords": [
     "ai",
