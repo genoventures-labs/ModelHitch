@@ -12,6 +12,7 @@
   <a href="#codex-plugin">Codex plugin</a> ·
   <a href="#claude-skills">Claude skills</a> ·
   <a href="#cursor-plugin">Cursor plugin</a> ·
+  <a href="#vs-code-and-github-copilot">VS Code</a> ·
   <a href="#providers">Providers</a> ·
   <a href="#cli">CLI</a> ·
   <a href="#agent-bridge">Agent bridge</a> ·
@@ -113,6 +114,21 @@ For local testing before the marketplace listing is approved, copy `plugins/mode
 `~/.cursor/plugins/local/modelhitch`, then restart Cursor or run **Developer: Reload Window**.
 The plugin teaches Cursor to integrate the npm and React APIs, configure the local bridge, add
 providers, and diagnose routing, failover, and usage.
+
+## VS Code and GitHub Copilot
+
+ModelHitch also follows the portable Agent Plugins 1.0 format used by GitHub Copilot in VS Code,
+Copilot CLI, and Copilot cloud agent. Register this repository and install the plugin with Copilot
+CLI:
+
+```bash
+copilot plugin marketplace add genoventures-labs/ModelHitch
+copilot plugin install modelhitch@modelhitch
+```
+
+VS Code automatically discovers plugins installed by Copilot CLI. You can also add the repository
+through the VS Code Agent Customizations editor. When working directly in this repository, VS Code
+discovers the project skills under `.claude/skills/` without a separate installation.
 
 ## CLI
 
