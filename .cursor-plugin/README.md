@@ -4,6 +4,12 @@
 
 # ModelHitch for Cursor
 
+Fastest personal skill install:
+
+```bash
+npx modelhitch setup cursor
+```
+
 [![Cursor ready](https://img.shields.io/badge/Cursor-ready-f28c28?style=for-the-badge)](../plugins/modelhitch/README.md)
 [![Plugin](https://img.shields.io/badge/plugin-included-cc3f88?style=for-the-badge)](../plugins/modelhitch/.cursor-plugin/plugin.json)
 [![Skill](https://img.shields.io/badge/skill-included-8bd600?style=for-the-badge)](../plugins/modelhitch/skills/modelhitch/SKILL.md)

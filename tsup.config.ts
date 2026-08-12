@@ -7,6 +7,7 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   target: 'es2022',
+  loader: { '.md': 'text' },
   // React stays a peer dependency of the `modelhitch/react` entry — never
   // bundle it.
   external: ['react', 'react/jsx-runtime'],

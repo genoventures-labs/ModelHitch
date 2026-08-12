@@ -4,6 +4,12 @@
 
 # ModelHitch skills for Claude
 
+Install both skills for your user account:
+
+```bash
+npx modelhitch setup claude
+```
+
 [![Claude ready](https://img.shields.io/badge/Claude-ready-f28c28?style=for-the-badge)](./modelhitch-integrate/SKILL.md)
 [![Two skills](https://img.shields.io/badge/skills-2-8bd600?style=for-the-badge)](#skills)
 [![Agent Skills](https://img.shields.io/badge/Agent_Skills-portable-cc3f88?style=for-the-badge)](https://agentskills.io)

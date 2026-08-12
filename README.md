@@ -46,6 +46,19 @@ bring their own keys, and route requests to the provider or model that fits the 
 
 One routing layer, four agent surfaces, one shared source of truth. Pick your agent and clock in:
 
+```bash
+npx modelhitch setup codex    # or claude, cursor, vscode, all
+```
+
+That installs the bundled skill into the agent's personal skills directory. Add `--project` for
+the current repository, `--dry-run` to preview paths, or `--force` to update an existing install.
+
+| Agent | Get it | Install or use |
+| --- | --- | --- |
+| **Codex** | [Plugin guide](./.agents/plugins/README.md) | `npx modelhitch setup codex` |
+| **Claude Code / Claude.ai** | [Skill guide](./.claude/skills/README.md) | `npx modelhitch setup claude` |
+| **Cursor** | [Plugin guide](./.cursor-plugin/README.md) | `npx modelhitch setup cursor` |
+| **VS Code / GitHub Copilot** | [Plugin guide](./.github/plugin/README.md) | `npx modelhitch setup vscode` |
 | Agent | Get it | Install or use |
 | --- | --- | --- |
 | **Codex** | [Plugin guide](./.agents/plugins/README.md) | `codex plugin marketplace add genoventures-labs/ModelHitch` → `codex plugin add modelhitch@modelhitch` |
@@ -184,6 +197,7 @@ ModelHitch ships a small CLI — every command greets you with the logo:
 ```bash
 npx modelhitch            # logo, version, and command help
 npx modelhitch bridge     # start the local OpenAI-compatible bridge server
+npx modelhitch setup all  # install skills for Codex, Claude, Cursor, and VS Code
 npx modelhitch --version
 npx modelhitch --help
 ```
