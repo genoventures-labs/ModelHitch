@@ -2,6 +2,7 @@
 // Hitch any model to your app: one interface, user-supplied providers & keys.
 
 export { ModelHitch, type ModelHitchOptions, type ChatInput } from './client.js';
+export { ASCII_LOGO, printAsciiLogo } from './ascii.js';
 export { runToolLoop, type ToolExecutor, type ToolLoopOptions, type ToolLoopEvent } from './agent.js';
 export { defaultProviders } from './registry.js';
 export { MemoryKeyStore } from './storage/memory.js';

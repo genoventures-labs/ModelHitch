@@ -10,6 +10,7 @@
 <p align="center">
   <a href="#quickstart">Quickstart</a> ·
   <a href="#providers">Providers</a> ·
+  <a href="#cli">CLI</a> ·
   <a href="#agent-bridge">Agent bridge</a> ·
   <a href="#auto-mode-survive-rate-limits">Auto-mode</a> ·
   <a href="#usage-tokens-and-spend">Usage</a> ·
@@ -68,6 +69,28 @@ const stream = await mh.stream({
 for await (const chunk of stream) {
   if (chunk.type === 'text-delta') process.stdout.write(chunk.text);
 }
+```
+
+## CLI
+
+ModelHitch ships a small CLI — every command greets you with the logo:
+
+```bash
+npx modelhitch            # logo, version, and command help
+npx modelhitch bridge     # start the local OpenAI-compatible bridge server
+npx modelhitch --version
+npx modelhitch --help
+```
+
+`modelhitch bridge` is the same bridge as `npm run bridge` (auto-mode ON,
+SQLite usage persistence, usage dashboard) and honors `MODELHITCH_PORT`,
+`MODELHITCH_HOST`, and `MODELHITCH_MAX_BODY_BYTES`. The logo also prints when
+the example entry points start: `npm run bridge`, `npm run example`, and
+`npm run canary`. You can print it anywhere in your own app:
+
+```ts
+import { printAsciiLogo } from 'modelhitch';
+printAsciiLogo(); // the chain-link mark + "hitch" wordmark
 ```
 
 ## Providers

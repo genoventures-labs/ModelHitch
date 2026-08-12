@@ -12,12 +12,15 @@ import {
   ModelHitchError,
   OPENCODE_GO_MODELS,
   OPENCODE_ZEN_MODELS,
+  printAsciiLogo,
 } from '../src/index.js';
 
 const ZEN_KEY = process.env.OPENCODE_ZEN_API_KEY;
 const GO_KEY = process.env.OPENCODE_GO_API_KEY;
 
 const mh = new ModelHitch();
+
+printAsciiLogo();
 
 async function main() {
   // Pick a provider: mock (default) > OpenCode Zen > OpenCode Go > fail.

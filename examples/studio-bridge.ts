@@ -26,6 +26,7 @@ import {
   createModelHitchServer,
   OPENCODE_GO_MODELS,
   OPENCODE_ZEN_MODELS,
+  printAsciiLogo,
 } from '../src/index.js';
 
 const PORT = Number(process.env.MODELHITCH_PORT ?? 3939);
@@ -33,6 +34,7 @@ const HOST = '127.0.0.1';
 const MAX_BODY_BYTES = Number(process.env.MODELHITCH_MAX_BODY_BYTES ?? 64 * 1024 * 1024);
 
 async function main() {
+  printAsciiLogo();
   const server = createModelHitchServer({
     defaultProviderId: 'opencode-zen',
     staticModels: {

@@ -39,11 +39,13 @@ const DEFAULT_FILE = 'modelhitch-usage.db';
 
 function loadSqlite(): SqliteModule {
   // `node:sqlite` must be required lazily — a top-level import would crash the
-  // whole package on Node < 22.5. `typeof require === 'function'` lets the
-  // same source work in both CJS and ESM builds.
-  const req = typeof require === 'function' ? require : createRequire(import.meta.url);
+  // whole package on Node < 22.5. `createRequire(import.meta.url)` works in
+  // both the ESM and CJS builds (esbuild rewrites `import.meta.url` to
+  // `pathToFileURL(__filename).href` in CJS output). Unlike a bare `require`
+  // reference, it is never intercepted by esbuild's `__require` Proxy shim,
+  // which throws "Dynamic require of ... is not supported" in ESM output.
   try {
-    return req('node:sqlite') as SqliteModule;
+    return createRequire(import.meta.url)('node:sqlite') as SqliteModule;
   } catch {
     throw new Error(
       `SQLite usage persistence requires Node >= 22.5 (found ${process.version}). ` +

@@ -25,7 +25,7 @@
  * correctly uses the tool result in its final answer.
  */
 import { readFileSync } from 'node:fs';
-import { OPENCODE_ZEN_MODELS, createModelHitchServer, zenProtocolForModel } from '../src/index.js';
+import { OPENCODE_ZEN_MODELS, createModelHitchServer, printAsciiLogo, zenProtocolForModel } from '../src/index.js';
 
 /** Load a local .env file (if present) so the key doesn't depend on a terminal session. */
 function loadDotEnv(): void {
@@ -570,6 +570,7 @@ async function answerWithGeminiResult(
 }
 
 async function main() {
+  printAsciiLogo();
   const server = createModelHitchServer({
     providers: undefined, // built-in set includes opencodeZen
     defaultProviderId: 'opencode-zen',
