@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "modelhitch",
+  "version": "0.10.0",
+  "description": "Build and operate BYOK, multi-provider AI applications with ModelHitch.",
+  "author": {
+    "name": "Geno Ventures Labs",
+    "url": "https://github.com/genoventures-labs"
+  },
+  "homepage": "https://github.com/genoventures-labs/ModelHitch#readme",
+  "repository": "https://github.com/genoventures-labs/ModelHitch",
+  "license": "MIT",
+  "keywords": ["ai", "llm", "byok", "providers", "bridge"]
+}

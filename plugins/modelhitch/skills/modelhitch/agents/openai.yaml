@@ -1,0 +1,4 @@
+interface:
+  display_name: "ModelHitch"
+  short_description: "Build and operate multi-provider AI apps"
+  default_prompt: "Use ModelHitch to integrate this app with the right AI providers and verify it works."

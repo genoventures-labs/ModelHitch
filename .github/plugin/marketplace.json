@@ -1,0 +1,27 @@
+{
+  "name": "modelhitch",
+  "owner": {
+    "name": "Geno Ventures Labs"
+  },
+  "metadata": {
+    "description": "ModelHitch plugins for building and operating BYOK, multi-provider AI applications.",
+    "version": "0.10.0"
+  },
+  "plugins": [
+    {
+      "name": "modelhitch",
+      "source": "./plugins/modelhitch",
+      "description": "Integrate ModelHitch and operate its multi-wire local agent bridge.",
+      "version": "0.10.0",
+      "author": {
+        "name": "Geno Ventures Labs"
+      },
+      "homepage": "https://github.com/genoventures-labs/ModelHitch#readme",
+      "repository": "https://github.com/genoventures-labs/ModelHitch",
+      "license": "MIT",
+      "keywords": ["ai", "llm", "byok", "providers", "bridge"],
+      "category": "Developer Tools",
+      "tags": ["typescript", "react", "agents"]
+    }
+  ]
+}
