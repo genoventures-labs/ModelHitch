@@ -9,6 +9,7 @@
 
 <p align="center">
   <a href="#quickstart">Quickstart</a> ·
+  <a href="#codex-plugin">Codex plugin</a> ·
   <a href="#providers">Providers</a> ·
   <a href="#cli">CLI</a> ·
   <a href="#agent-bridge">Agent bridge</a> ·
@@ -70,6 +71,23 @@ for await (const chunk of stream) {
   if (chunk.type === 'text-delta') process.stdout.write(chunk.text);
 }
 ```
+
+## Codex plugin
+
+ModelHitch also ships as a public Codex plugin. Add this repository as a marketplace, then install
+the plugin:
+
+```bash
+codex plugin marketplace add genoventures-labs/ModelHitch
+codex plugin add modelhitch@modelhitch
+```
+
+Start a new Codex task after installation. The plugin teaches Codex how to integrate the npm
+library, build BYOK and React flows, configure the local agent bridge, add providers, and diagnose
+routing, failover, and usage.
+
+The plugin and npm package are complementary: install the plugin for Codex guidance, and install
+`modelhitch` in an application when the application needs the runtime library.
 
 ## CLI
 

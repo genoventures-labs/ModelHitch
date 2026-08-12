@@ -1,0 +1,28 @@
+{
+  "name": "modelhitch",
+  "version": "0.10.0",
+  "description": "Build and operate BYOK, multi-provider AI applications with ModelHitch.",
+  "author": {
+    "name": "Geno Ventures Labs",
+    "url": "https://github.com/genoventures-labs"
+  },
+  "homepage": "https://github.com/genoventures-labs/ModelHitch#readme",
+  "repository": "https://github.com/genoventures-labs/ModelHitch",
+  "license": "MIT",
+  "keywords": ["ai", "llm", "byok", "providers", "bridge"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ModelHitch",
+    "shortDescription": "Hitch any AI model to your app.",
+    "longDescription": "Integrate ModelHitch's npm API, build BYOK chat experiences, configure its multi-wire local agent bridge, add providers, and diagnose routing, failover, and usage.",
+    "developerName": "Geno Ventures Labs",
+    "category": "Developer Tools",
+    "capabilities": ["Code", "CLI", "Local bridge"],
+    "websiteURL": "https://github.com/genoventures-labs/ModelHitch",
+    "defaultPrompt": [
+      "Add ModelHitch to this app with BYOK support.",
+      "Set up the ModelHitch bridge for my coding agent.",
+      "Diagnose this ModelHitch provider or failover issue."
+    ]
+  }
+}
