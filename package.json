@@ -44,7 +44,8 @@
     "test:watch": "vitest",
     "example": "tsx examples/quickstart.ts",
     "bridge": "tsx examples/studio-bridge.ts",
-    "canary": "tsx examples/canary.ts"
+    "canary": "tsx examples/canary.ts",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "keywords": [
     "ai",
@@ -59,6 +60,11 @@
     "openrouter"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/genoventures-labs/ModelHitch.git"
+  },
+  "homepage": "https://github.com/genoventures-labs/ModelHitch#readme",
   "devDependencies": {
     "@types/node": "^26.2.0",
     "@types/react": "^18.3.31",

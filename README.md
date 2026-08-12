@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="repo_assets/repo_banner.png" alt="ModelHitch - LLM temp agency" width="100%"/>
+  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/repo_banner.png" alt="ModelHitch - LLM temp agency" width="100%"/>
 </p>
 
 <p align="center">
@@ -25,7 +25,7 @@ bring their own keys, and route requests to the provider or model that fits the 
 ## The desk
 
 <p align="center">
-  <img src="repo_assets/own_section.png" alt="One interface. BYOK. Any model, any time. No questions. Just results." width="85%"/>
+  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/own_section.png" alt="One interface. BYOK. Any model, any time. No questions. Just results." width="85%"/>
 </p>
 
 | What you get | What it means |
@@ -485,7 +485,7 @@ client) retry 429/5xx/network failures on fallback lanes automatically.
 ## Contributing
 
 <p align="center">
-  <img src="repo_assets/contrib_image.png" alt="Contribution policy - clone, look, and modify your own version" width="85%"/>
+  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/contrib_image.png" alt="Contribution policy - clone, look, and modify your own version" width="85%"/>
 </p>
 
 The rules are simple: clone it, look around, and modify your own version. Public contributions
@@ -510,9 +510,9 @@ npm run canary
 MIT
 
 <p align="center">
-  <img src="repo_assets/hitch_meme.png" alt="Mutant ninja temps clock in and ship code" width="90%"/>
+  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/hitch_meme.png" alt="Mutant ninja temps clock in and ship code" width="90%"/>
 </p>
 
 <p align="center">
-  <img src="repo_assets/footer_repo.png" alt="ModelHitch - We route. You build." width="90%"/>
+  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/footer_repo.png" alt="ModelHitch - We route. You build." width="90%"/>
 </p>
