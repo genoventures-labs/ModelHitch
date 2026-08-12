@@ -1,3 +1,6 @@
+<p align="center"><img src="../repo_assets/guide_banner.png" width="750"></p>
+
+
 # ModelHitch guide
 
 The root [README](../README.md) is the storefront. This is the operations manual.
