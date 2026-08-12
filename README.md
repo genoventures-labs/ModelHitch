@@ -10,6 +10,7 @@
 <p align="center">
   <a href="#quickstart">Quickstart</a> ·
   <a href="#codex-plugin">Codex plugin</a> ·
+  <a href="#claude-skills">Claude skills</a> ·
   <a href="#providers">Providers</a> ·
   <a href="#cli">CLI</a> ·
   <a href="#agent-bridge">Agent bridge</a> ·
@@ -88,6 +89,18 @@ routing, failover, and usage.
 
 The plugin and npm package are complementary: install the plugin for Codex guidance, and install
 `modelhitch` in an application when the application needs the runtime library.
+
+## Claude skills
+
+The repository includes two native Claude Code skills under `.claude/skills/`:
+
+- `/modelhitch-integrate` for TypeScript, React, BYOK, provider, tool, and failover work
+- `/modelhitch-bridge` for Claude Code, Codex, Gemini, IDE, and bridge operations
+
+Claude Code discovers them automatically when working in this repository. To use them in another
+project, copy either skill directory into that project's `.claude/skills/` directory or into
+`~/.claude/skills/` for personal use. Each directory follows the portable Agent Skills format and
+can be zipped individually for upload to Claude.ai.
 
 ## CLI
 
