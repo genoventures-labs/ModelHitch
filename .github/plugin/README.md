@@ -4,6 +4,12 @@
 
 # ModelHitch for VS Code and GitHub Copilot
 
+Fastest personal skill install:
+
+```bash
+npx modelhitch setup vscode
+```
+
 [![VS Code ready](https://img.shields.io/badge/VS_Code-ready-2296f3?style=for-the-badge)](../../plugins/modelhitch/README.md)
 [![Agent Plugins 1.0](https://img.shields.io/badge/Agent_Plugins-1.0-cc3f88?style=for-the-badge)](../../plugins/modelhitch/plugin.json)
 [![Skill](https://img.shields.io/badge/skill-included-8bd600?style=for-the-badge)](../../plugins/modelhitch/skills/modelhitch/SKILL.md)

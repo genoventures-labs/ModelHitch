@@ -4,6 +4,12 @@
 
 # ModelHitch for Codex
 
+Fastest personal install:
+
+```bash
+npx modelhitch setup codex
+```
+
 [![Codex ready](https://img.shields.io/badge/Codex-ready-8757e5?style=for-the-badge)](../../plugins/modelhitch/README.md)
 [![Plugin](https://img.shields.io/badge/plugin-included-cc3f88?style=for-the-badge)](../../plugins/modelhitch/.codex-plugin/plugin.json)
 [![Skill](https://img.shields.io/badge/skill-included-8bd600?style=for-the-badge)](../../plugins/modelhitch/skills/modelhitch/SKILL.md)

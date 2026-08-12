@@ -46,12 +46,19 @@ bring their own keys, and route requests to the provider or model that fits the 
 
 One routing layer, four agent surfaces, one shared source of truth. Pick your agent and clock in:
 
+```bash
+npx modelhitch setup codex    # or claude, cursor, vscode, all
+```
+
+That installs the bundled skill into the agent's personal skills directory. Add `--project` for
+the current repository, `--dry-run` to preview paths, or `--force` to update an existing install.
+
 | Agent | Get it | Install or use |
 | --- | --- | --- |
-| **Codex** | [Plugin guide](./.agents/plugins/README.md) | `codex plugin marketplace add genoventures-labs/ModelHitch` → `codex plugin add modelhitch@modelhitch` |
-| **Claude Code / Claude.ai** | [Skill guide](./.claude/skills/README.md) | Auto-discovered in this repo; copy or upload [`modelhitch-integrate`](./.claude/skills/modelhitch-integrate/SKILL.md) and [`modelhitch-bridge`](./.claude/skills/modelhitch-bridge/SKILL.md) elsewhere |
-| **Cursor** | [Plugin guide](./.cursor-plugin/README.md) | Marketplace-ready; locally load [`plugins/modelhitch`](./plugins/modelhitch/README.md) |
-| **VS Code / GitHub Copilot** | [Plugin guide](./.github/plugin/README.md) | `copilot plugin marketplace add genoventures-labs/ModelHitch` → `copilot plugin install modelhitch@modelhitch` |
+| **Codex** | [Plugin guide](./.agents/plugins/README.md) | `npx modelhitch setup codex` |
+| **Claude Code / Claude.ai** | [Skill guide](./.claude/skills/README.md) | `npx modelhitch setup claude` |
+| **Cursor** | [Plugin guide](./.cursor-plugin/README.md) | `npx modelhitch setup cursor` |
+| **VS Code / GitHub Copilot** | [Plugin guide](./.github/plugin/README.md) | `npx modelhitch setup vscode` |
 
 The shared distributable package lives at [`plugins/modelhitch/`](./plugins/modelhitch/README.md).
 It contains separate Codex and Cursor presentation manifests plus the portable Agent Plugins 1.0
@@ -184,6 +191,7 @@ ModelHitch ships a small CLI — every command greets you with the logo:
 ```bash
 npx modelhitch            # logo, version, and command help
 npx modelhitch bridge     # start the local OpenAI-compatible bridge server
+npx modelhitch setup all  # install skills for Codex, Claude, Cursor, and VS Code
 npx modelhitch --version
 npx modelhitch --help
 ```

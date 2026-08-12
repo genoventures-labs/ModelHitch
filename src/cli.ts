@@ -8,6 +8,7 @@
  *   modelhitch status     is a background bridge running?
  *   modelhitch front      stop the background one and run the bridge in this terminal
  *   modelhitch stop       stop the background bridge
+ *   modelhitch setup codex  install the ModelHitch skill for Codex
  *   modelhitch --version  print the version
  *   modelhitch --help     print help
  *
@@ -21,6 +22,7 @@ import { readFileSync } from 'node:fs';
 import { printAsciiLogo } from './ascii.js';
 import { createModelHitchServer } from './server/server.js';
 import { OPENCODE_GO_MODELS, OPENCODE_ZEN_MODELS } from './providers/opencode.js';
+import { installSkills, SETUP_TARGETS, type SetupTarget } from './skill-installer.js';
 import {
   clearPid,
   daemonStatus,
@@ -45,11 +47,19 @@ Usage:
   modelhitch status         is a background bridge running?
   modelhitch front          stop the background one, run the bridge in this terminal
   modelhitch stop           stop the background bridge
+  modelhitch setup <agent>  install skills for codex, claude, cursor, vscode, or all
   modelhitch --version      print the version
   modelhitch --help         print this help
 
 Background process:
   tracked in ~/.modelhitch (bridge.pid + bridge.log, override with MODELHITCH_HOME)
+
+Skill setup:
+  modelhitch setup codex            install to the agent's user skill directory
+  modelhitch setup all --project    install project skills for all four agents
+  --project                         install in the current project instead
+  --dry-run                         show destinations without writing
+  --force                           update files in existing skill directories
 
 Bridge environment:
   MODELHITCH_PORT           port (default 3939)
@@ -184,6 +194,27 @@ async function runStop(): Promise<void> {
   }
 }
 
+function runSetup(args: string[]): void {
+  const target = args[0];
+  if (!target || !SETUP_TARGETS.includes(target as SetupTarget)) {
+    throw new Error('Choose an agent: codex, claude, cursor, vscode, or all.');
+  }
+  const known = new Set(['--project', '--dry-run', '--force']);
+  const unknown = args.slice(1).filter((arg) => !known.has(arg));
+  if (unknown.length > 0) throw new Error(`Unknown setup option: ${unknown[0]}`);
+
+  const dryRun = args.includes('--dry-run');
+  const installed = installSkills({
+    target: target as SetupTarget,
+    scope: args.includes('--project') ? 'project' : 'user',
+    force: args.includes('--force'),
+    dryRun,
+  });
+  console.log(dryRun ? 'ModelHitch would install:' : 'ModelHitch skills installed:');
+  for (const skill of installed) console.log(`  ${skill.agent.padEnd(7)} ${skill.path}`);
+  if (!dryRun) console.log('\nRestart the agent or open a new session so it discovers the skill.');
+}
+
 async function main(): Promise<void> {
   printAsciiLogo();
   const args = process.argv.slice(2);
@@ -213,6 +244,9 @@ async function main(): Promise<void> {
       break;
     case 'stop':
       await runStop();
+      break;
+    case 'setup':
+      runSetup(args.slice(1));
       break;
     default:
       console.log(`Unknown command: ${cmd}\n`);
