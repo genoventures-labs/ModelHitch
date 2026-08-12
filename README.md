@@ -8,6 +8,14 @@
 </p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/modelhitch"><img alt="npm version" src="https://img.shields.io/npm/v/modelhitch?style=for-the-badge&color=8bd600"/></a>
+  <a href="https://www.npmjs.com/package/modelhitch"><img alt="npm downloads" src="https://img.shields.io/npm/dm/modelhitch?style=for-the-badge&color=cc3f88"/></a>
+  <a href="./LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-17b8d4?style=for-the-badge"/></a>
+  <img alt="Node 18 or later" src="https://img.shields.io/badge/node-%E2%89%A518-8bd600?style=for-the-badge&logo=node.js&logoColor=white"/>
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-ready-3178c6?style=for-the-badge&logo=typescript&logoColor=white"/>
+</p>
+
+<p align="center">
   <a href="#quickstart">Quickstart</a> ·
   <a href="#codex-plugin">Codex plugin</a> ·
   <a href="#claude-skills">Claude skills</a> ·
@@ -75,7 +83,27 @@ for await (const chunk of stream) {
 }
 ```
 
+## Plugins + skills
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/All4.png" alt="ModelHitch plugins and skills for Codex, Cursor, VS Code, and Claude" width="100%"/>
+</p>
+
+One routing layer, four agent surfaces, one shared source of truth. The manifests live beside the
+same source-backed ModelHitch skills, so platform packaging does not fork the guidance.
+
+| Agent | Distribution | What it loads |
+| --- | --- | --- |
+| Codex | `.agents/plugins/marketplace.json` | `plugins/modelhitch/.codex-plugin/` |
+| Claude | `.claude/skills/` | Two focused project/uploadable skills |
+| Cursor | `.cursor-plugin/marketplace.json` | `plugins/modelhitch/.cursor-plugin/` |
+| VS Code / Copilot | `.github/plugin/marketplace.json` | Portable Agent Plugins 1.0 manifest |
+
 ## Codex plugin
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/Codex.png" alt="ModelHitch Codex plugin and skills" width="100%"/>
+</p>
 
 ModelHitch also ships as a public Codex plugin. Add this repository as a marketplace, then install
 the plugin:
@@ -94,6 +122,10 @@ The plugin and npm package are complementary: install the plugin for Codex guida
 
 ## Claude skills
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/Claude.png" alt="ModelHitch Claude skills" width="100%"/>
+</p>
+
 The repository includes two native Claude Code skills under `.claude/skills/`:
 
 - `/modelhitch-integrate` for TypeScript, React, BYOK, provider, tool, and failover work
@@ -106,6 +138,10 @@ can be zipped individually for upload to Claude.ai.
 
 ## Cursor plugin
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/Cursor.png" alt="ModelHitch Cursor plugin and skills" width="100%"/>
+</p>
+
 The same ModelHitch skill is packaged for Cursor under `plugins/modelhitch/`, alongside the Codex
 manifest. The repository includes `.cursor-plugin/marketplace.json` and is ready for Cursor
 Marketplace submission.
@@ -116,6 +152,10 @@ The plugin teaches Cursor to integrate the npm and React APIs, configure the loc
 providers, and diagnose routing, failover, and usage.
 
 ## VS Code and GitHub Copilot
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/VSCode.png" alt="ModelHitch VS Code and GitHub Copilot plugin and skills" width="100%"/>
+</p>
 
 ModelHitch also follows the portable Agent Plugins 1.0 format used by GitHub Copilot in VS Code,
 Copilot CLI, and Copilot cloud agent. Register this repository and install the plugin with Copilot
