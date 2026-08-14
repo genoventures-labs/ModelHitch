@@ -168,6 +168,45 @@ describe('responsesInputToMessages — function_call_output', () => {
     expect(tool!.toolCallId).toBe('call_1');
   });
 
+  it('keeps image-bearing output parts as placeholders (never empty tool content)', () => {
+    // GLM 5.2 regression: a tool that reads an image returns its result as a
+    // parts array containing output_image parts. Serializing only output_text
+    // collapsed this to an empty tool message — and any non-string tool
+    // content is rejected upstream with `ChatCompletionToolMessage.content`
+    // "Input should be a valid string". The tool message must stay a string
+    // and must not silently become empty.
+    const messages = responsesInputToMessages([
+      { type: 'function_call', call_id: 'call_img', name: 'read_image', arguments: '{}' },
+      {
+        type: 'function_call_output',
+        call_id: 'call_img',
+        output: [
+          { type: 'output_text', text: 'The image shows a sunset.' },
+          { type: 'output_image', image_url: 'data:image/png;base64,iVBORw0KGgo=' },
+        ],
+      },
+    ]);
+    const tool = messages.find((m) => m.role === 'tool');
+    expect(tool).toBeDefined();
+    expect(tool!.content).toBe('The image shows a sunset.[image: image/png]');
+    expect(tool!.toolCallId).toBe('call_img');
+  });
+
+  it('never emits a non-string tool message from image-only output parts', () => {
+    const messages = responsesInputToMessages([
+      { type: 'function_call', call_id: 'call_img', name: 'read_image', arguments: '{}' },
+      {
+        type: 'function_call_output',
+        call_id: 'call_img',
+        output: [{ type: 'output_image', image_url: 'https://example.com/pic.png' }],
+      },
+    ]);
+    const tool = messages.find((m) => m.role === 'tool');
+    expect(tool).toBeDefined();
+    expect(typeof tool!.content).toBe('string');
+    expect(tool!.content).toBe('[image: https://example.com/pic.png]');
+  });
+
   it('keeps a string output verbatim', () => {
     const messages = responsesInputToMessages([
       { type: 'function_call', call_id: 'call_1', name: 'get_weather', arguments: '{}' },
@@ -394,6 +433,18 @@ describe('tool-output helpers (call-id re-anchoring)', () => {
       { role: 'tool', content: '{"temp": 21}', toolCallId: 'call_1' },
       { role: 'tool', content: 'parts result', toolCallId: 'call_2' },
     ]);
+  });
+
+  it('serializes image-bearing outputs to string placeholders (GLM 5.2 regression)', () => {
+    const outputs = toolOutputsFromInput([
+      {
+        type: 'function_call_output',
+        call_id: 'call_img',
+        output: [{ type: 'output_image', image_url: 'data:image/jpeg;base64,/9j/4AAQ' }],
+      },
+    ]);
+    expect(outputs).toEqual([{ callId: 'call_img', output: '[image: image/jpeg]' }]);
+    expect(toolMessagesFromOutputs(outputs)[0]).toMatchObject({ role: 'tool', content: '[image: image/jpeg]' });
   });
 
   it('finds the most recent conversation whose assistant tool call matches', () => {

@@ -131,6 +131,41 @@ function itemContent(item: Record<string, unknown>): string | ContentPart[] {
 }
 
 /**
+ * Serialize a Responses `function_call_output` parts-array (the shape the
+ * extension emits when prompt-cache breakpoints are enabled) into plain text.
+ *
+ * Tool results are sent as chat-completions `tool` messages, whose content
+ * must be a string (GLM's pydantic backend rejects anything else with
+ * "Input should be a valid string"). Text parts serialize to their text;
+ * image parts keep a stable placeholder instead of silently collapsing to
+ * nothing (an all-image tool result would otherwise become an empty tool
+ * message).
+ */
+function serializeOutputParts(parts: unknown[]): string {
+  const out: string[] = [];
+  for (const raw of parts) {
+    const part = (raw ?? {}) as Record<string, unknown>;
+    if (part.type === 'output_text') {
+      out.push(String(part.text ?? ''));
+      continue;
+    }
+    if (part.type === 'output_image') {
+      const url = part.image_url;
+      const src = typeof url === 'string' ? url : String((url as Record<string, unknown> | undefined)?.url ?? '');
+      const m = /^data:([^;,]+);base64,(.+)$/s.exec(src);
+      out.push(m ? `[image: ${m[1]}]` : src ? `[image: ${src}]` : '[image]');
+      continue;
+    }
+    if (part.type === 'output_audio') {
+      out.push('[audio]');
+      continue;
+    }
+    // prompt_cache_breakpoint and other structural parts carry no content.
+  }
+  return out.join('');
+}
+
+/**
  * Convert Responses `input` items into normalized messages. Consecutive
  * top-level `function_call` items are merged into a single assistant message
  * (they belong to one assistant turn); each `function_call_output` becomes the
@@ -191,10 +226,9 @@ export function responsesInputToMessages(
       if (typeof output === 'string') content = output;
       else if (Array.isArray(output)) {
         // The extension emits output as a parts array when prompt-cache
-        // breakpoints are enabled — serialize only the text-bearing parts.
-        content = output
-          .map((p) => ((p as Record<string, unknown>).type === 'output_text' ? String((p as Record<string, unknown>).text ?? '') : ''))
-          .join('');
+        // breakpoints are enabled — serialize the text-bearing parts and
+        // keep image placeholders so the tool message is never empty.
+        content = serializeOutputParts(output);
       } else {
         content = JSON.stringify(output ?? '');
       }
@@ -330,9 +364,7 @@ export function toolOutputsFromInput(input: unknown[] | undefined): Array<{ call
     let content: string;
     if (typeof output === 'string') content = output;
     else if (Array.isArray(output)) {
-      content = output
-        .map((p) => ((p as Record<string, unknown>).type === 'output_text' ? String((p as Record<string, unknown>).text ?? '') : ''))
-        .join('');
+      content = serializeOutputParts(output);
     } else {
       content = JSON.stringify(output ?? '');
     }

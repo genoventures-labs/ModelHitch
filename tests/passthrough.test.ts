@@ -94,6 +94,65 @@ describe('tool_choice / response_format passthrough (OpenAI-compatible adapter)'
     await provider.chat({ ...baseParams, toolChoice: 'none' }, {});
     expect(calls[0]!.body.tool_choice).toBe('none');
   });
+
+  it('coerces non-string tool content to a string before sending (GLM 5.2 regression)', async () => {
+    // GLM's pydantic backend rejects tool messages whose `content` is not a
+    // string (`ChatCompletionToolMessage.content` "Input should be a valid
+    // string"). The adapter must never forward a non-string tool message.
+    const { fetchImpl, calls } = mockFetch();
+    const provider = createOpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test',
+      defaultModel: 'test-model',
+      baseUrl: 'https://example.com/v1',
+      requiresKey: false,
+      fetchImpl,
+    });
+    await provider.chat(
+      {
+        ...baseParams,
+        messages: [
+          { role: 'user', content: 'read the image' },
+          { role: 'assistant', content: '', toolCalls: [{ id: 'call_1', name: 'read_image', arguments: {} }] },
+          // Simulate a tool message whose content somehow is not a plain
+          // string at runtime (e.g. an array/object left over from mapping).
+          { role: 'tool', content: [{ type: 'output_image', image_url: 'data:image/png;base64,abc' }] as unknown as string, toolCallId: 'call_1' },
+        ],
+      },
+      {},
+    );
+    const messages = calls[0]!.body.messages as Array<Record<string, unknown>>;
+    const toolMsg = messages.find((m) => m.role === 'tool');
+    expect(toolMsg).toBeDefined();
+    expect(typeof toolMsg!.content).toBe('string');
+    expect(toolMsg!.content).toContain('image');
+  });
+
+  it('keeps plain string tool content untouched', async () => {
+    const { fetchImpl, calls } = mockFetch();
+    const provider = createOpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test',
+      defaultModel: 'test-model',
+      baseUrl: 'https://example.com/v1',
+      requiresKey: false,
+      fetchImpl,
+    });
+    await provider.chat(
+      {
+        ...baseParams,
+        messages: [
+          { role: 'user', content: 'hi' },
+          { role: 'assistant', content: '', toolCalls: [{ id: 'call_1', name: 'get_weather', arguments: {} }] },
+          { role: 'tool', content: '{"temp": 21}', toolCallId: 'call_1' },
+        ],
+      },
+      {},
+    );
+    const messages = calls[0]!.body.messages as Array<Record<string, unknown>>;
+    const toolMsg = messages.find((m) => m.role === 'tool');
+    expect(toolMsg!.content).toBe('{"temp": 21}');
+  });
 });
 
 describe('tool_choice / response_format normalization (bridge mapping)', () => {

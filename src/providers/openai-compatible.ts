@@ -111,7 +111,15 @@ function toOpenAIMessages(messages: ModelMessage[]): OpenAIMessage[] {
           })),
         };
       case 'tool':
-        return { role: 'tool', content: m.content, tool_call_id: m.toolCallId };
+        // Tool content must be a plain string for chat-completions providers
+        // (e.g. GLM's pydantic backend rejects anything else with
+        // "Input should be a valid string"). Defensively coerce: never let a
+        // non-string value reach the wire.
+        return {
+          role: 'tool',
+          content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''),
+          tool_call_id: m.toolCallId,
+        };
     }
   });
 }
