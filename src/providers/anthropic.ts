@@ -64,6 +64,15 @@ export interface AnthropicProviderOptions {
   /** Messages endpoint path (default "/messages"). */
   messagesPath?: string;
   capabilities?: Partial<Capabilities>;
+  /**
+   * Allow direct browser-origin calls. Anthropic's API rejects browser
+   * requests unless the `anthropic-dangerous-direct-browser-access: true`
+   * header is sent (the official SDK's `dangerouslyAllowBrowser` opt-in).
+   * Keep `false` on the server — this header is a footgun outside the browser.
+   */
+  dangerouslyAllowBrowser?: boolean;
+  /** Extra headers merged into every request (parity with `OpenAICompatibleConfig.headers`). */
+  headers?: Record<string, string>;
   fetchImpl?: typeof fetch;
 }
 
@@ -82,6 +91,8 @@ export class AnthropicProvider implements Provider {
   private readonly messagesPath: string;
   private readonly apiKeyEnvVar: string;
   private readonly apiKeyEnvFallbacks: string[];
+  private readonly dangerouslyAllowBrowser: boolean;
+  private readonly headers: Record<string, string> | undefined;
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: AnthropicProviderOptions = {}) {
@@ -92,6 +103,8 @@ export class AnthropicProvider implements Provider {
     this.messagesPath = opts.messagesPath ?? '/messages';
     this.apiKeyEnvVar = opts.apiKeyEnvVar ?? 'ANTHROPIC_API_KEY';
     this.apiKeyEnvFallbacks = opts.apiKeyEnvFallbacks ?? [];
+    this.dangerouslyAllowBrowser = opts.dangerouslyAllowBrowser ?? false;
+    this.headers = opts.headers;
     this.capabilities = {
       streaming: true,
       toolCalling: true,
@@ -244,7 +257,12 @@ export class AnthropicProvider implements Provider {
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
+      ...this.headers,
     };
+    if (this.dangerouslyAllowBrowser) {
+      // Explicit opt-in wins over any user-supplied value.
+      headers['anthropic-dangerous-direct-browser-access'] = 'true';
+    }
     try {
       return await this.fetchImpl(`${this.baseUrl}${this.messagesPath}`, {
         method: 'POST',
@@ -402,9 +420,15 @@ export class AnthropicProvider implements Provider {
 
   async listModels(credentials: ProviderCredentials): Promise<ModelInfo[]> {
     const apiKey = this.resolveApiKey(credentials);
-    const res = await this.fetchImpl(`${this.baseUrl}/models`, {
-      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-    });
+    const headers: Record<string, string> = {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      ...this.headers,
+    };
+    if (this.dangerouslyAllowBrowser) {
+      headers['anthropic-dangerous-direct-browser-access'] = 'true';
+    }
+    const res = await this.fetchImpl(`${this.baseUrl}/models`, { headers });
     if (!res.ok) throw new ModelHitchError('provider-error', `Failed to list Anthropic models: HTTP ${res.status}`, {
       providerId: this.id,
     });

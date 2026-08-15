@@ -7,6 +7,7 @@ The root [README](../README.md) is the storefront. This is the operations manual
 
 - [Library API](#library-api)
 - [Credentials and BYOK](#credentials-and-byok)
+- [Web apps (browser)](#web-apps-browser)
 - [Tools and React](#tools-and-react)
 - [Local agent bridge](#local-agent-bridge)
 - [Auto-mode failover](#auto-mode-failover)
@@ -67,6 +68,62 @@ the server. Never put a server credential in a browser bundle.
 | Z.ai (GLM) | `ZAI_API_KEY` |
 
 Local providers and `mock` require no key by default.
+
+## Web apps (browser)
+
+The library ships a browser entry. Bundlers (Vite, webpack, esbuild, Rollup) resolve the `browser`
+export condition automatically, so `import { ModelHitch } from 'modelhitch'` in a web app loads the
+browser build — no Node polyfills required. You can also import from the dedicated entry explicitly:
+
+```ts
+import { ModelHitch } from 'modelhitch/browser';
+```
+
+The browser entry exposes the full library surface (client, providers, keystores, agent tool loop,
+failover, usage tracking, stream helpers, types) minus the Node-only bridge server and SQLite usage
+storage, which are never included in the browser bundle.
+
+### Direct BYOK
+
+The direct-BYOK pattern keeps keys on the user's device — never ship a server key in a browser bundle:
+
+```ts
+import { ModelHitch, LocalStorageKeyStore } from 'modelhitch';
+
+const mh = new ModelHitch({ keystore: new LocalStorageKeyStore() });
+await mh.keystore?.set('openai', userPastedKey); // stored in localStorage only
+const result = await mh.chat({
+  provider: 'openai',
+  messages: [{ role: 'user', content: 'Hello' }],
+});
+```
+
+Keys stay in `localStorage` on the user's device and are read straight from the keystore on each call.
+
+### CORS notes
+
+Provider APIs that accept browser-origin calls without extra setup: OpenAI, OpenRouter, Groq,
+Together, DeepSeek, Mistral, xAI, Moonshot, Z.ai (GLM), HuggingFace, and OpenCode Zen/Go.
+
+Anthropic rejects browser-origin requests unless the request carries the
+`anthropic-dangerous-direct-browser-access: true` header. Pass `dangerouslyAllowBrowser: true` to
+the provider options to send it:
+
+```ts
+import { createAnthropicProvider } from 'modelhitch';
+
+const anthropic = createAnthropicProvider({ dangerouslyAllowBrowser: true });
+```
+
+Local runtimes (Ollama, LM Studio, vLLM, llama.cpp, KoboldCpp) must be reachable from the page's
+origin with CORS enabled — usually a dev-only setup via `localhost`. `mockProvider` works fully
+offline and needs no key, which makes it handy for demos.
+
+### React and Node-only pieces
+
+The React hooks (`useChat`, `useStream`) and `createBridgeClient` from `modelhitch/react` work
+unchanged in browsers. The bridge server and SQLite usage storage are Node-only and are never
+included in the browser bundle.
 
 ## Tools and React
 

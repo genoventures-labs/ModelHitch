@@ -82,6 +82,7 @@ or `--force` to update an existing install.
 | Surface | Included |
 | --- | --- |
 | **Library** | `chat`, `stream`, tools, model discovery, typed errors, custom providers |
+| **Web apps** | Browser bundler support via `modelhitch/browser` — no Node polyfills |
 | **BYOK** | Request keys, memory storage, browser local storage, environment fallback |
 | **React** | `useChat`, `useStream`, and a bridge client via `modelhitch/react` |
 | **Bridge** | OpenAI Chat/Responses, Anthropic Messages, and Gemini GenerateContent wires |

@@ -1,12 +1,23 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useChat, type UseChatOptions } from 'modelhitch/react';
-import type { ToolDefinition, ModelMessage } from 'modelhitch';
+import {
+  LocalStorageKeyStore,
+  ModelHitch,
+  type ModelMessage,
+  type ToolDefinition,
+} from 'modelhitch';
 
 /**
- * BYOK chat UI. Points at a local ModelHitch bridge (see `server.ts` in this
- * folder — run it with `npm run server`), which holds the keys and speaks
- * OpenAI-compatible /v1/chat/completions. The hooks then stream replies and
- * drive multi-turn tool calls automatically.
+ * BYOK chat UI with two modes:
+ *
+ * 1. **Bridge** (default) — points at a local ModelHitch bridge (see
+ *    `server.ts` in this folder — run it with `npm run server`), which holds
+ *    the keys and speaks OpenAI-compatible /v1/chat/completions. The hooks
+ *    then stream replies and drive multi-turn tool calls automatically.
+ * 2. **Direct BYOK** — chats straight from the browser via the `modelhitch`
+ *    browser build. The pasted API key is stored in localStorage through
+ *    `LocalStorageKeyStore` and never leaves the user's device. Works offline
+ *    with the `mock` provider.
  *
  * Swap `model` for any provider/model the bridge routes, e.g.
  * "opencode-zen/big-pickle" with a real bridge + keys.
@@ -43,7 +54,37 @@ const chatOptions: UseChatOptions = {
   },
 };
 
+type Mode = 'bridge' | 'direct';
+
 export function App() {
+  const [mode, setMode] = useState<Mode>('bridge');
+  return (
+    <main>
+      <h1>ModelHitch BYOK UI</h1>
+      <div className="tabs" role="tablist" aria-label="Connection mode">
+        <button
+          className={mode === 'bridge' ? 'tab active' : 'tab'}
+          role="tab"
+          aria-selected={mode === 'bridge'}
+          onClick={() => setMode('bridge')}
+        >
+          Bridge
+        </button>
+        <button
+          className={mode === 'direct' ? 'tab active' : 'tab'}
+          role="tab"
+          aria-selected={mode === 'direct'}
+          onClick={() => setMode('direct')}
+        >
+          Direct BYOK
+        </button>
+      </div>
+      {mode === 'bridge' ? <BridgeChat /> : <DirectChat />}
+    </main>
+  );
+}
+
+function BridgeChat() {
   const { messages, pending, activeTool, isThinking, error, usage, send, reset, cancel } = useChat(chatOptions);
   const [draft, setDraft] = useState('');
 
@@ -54,8 +95,7 @@ export function App() {
   };
 
   return (
-    <main>
-      <h1>ModelHitch BYOK UI</h1>
+    <>
       <p className="status">
         bridge: {BRIDGE_URL} · model: {MODEL} · {usage ? `tokens: ${usage.totalTokens ?? '?'}` : 'no usage yet'}
       </p>
@@ -85,7 +125,115 @@ export function App() {
         <button type="button" onClick={cancel} disabled={!isThinking}>Stop</button>
         <button type="button" onClick={reset}>Clear</button>
       </form>
-    </main>
+    </>
+  );
+}
+
+/** Providers the direct-BYOK mode can reach straight from the browser. */
+const DIRECT_PROVIDERS = [
+  { id: 'openai', name: 'OpenAI', model: 'gpt-4o-mini' },
+  { id: 'openrouter', name: 'OpenRouter', model: 'meta-llama/llama-3.1-8b-instruct:free' },
+  { id: 'mock', name: 'Mock (offline)', model: 'mock-model' },
+] as const;
+
+function DirectChat() {
+  const [mh] = useState(() => new ModelHitch({ keystore: new LocalStorageKeyStore() }));
+  const [providerId, setProviderId] = useState<string>('mock');
+  const [apiKey, setApiKey] = useState('');
+  const [draft, setDraft] = useState('');
+  const [messages, setMessages] = useState<ModelMessage[]>([]);
+  const [pending, setPending] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const provider = DIRECT_PROVIDERS.find((p) => p.id === providerId) ?? DIRECT_PROVIDERS[0];
+  const needsKey = provider.id !== 'mock';
+
+  // Load any stored key when the provider changes.
+  useEffect(() => {
+    let cancelled = false;
+    void mh.keystore?.get(providerId).then((key) => {
+      if (!cancelled) setApiKey(key ?? '');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mh, providerId]);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = draft.trim();
+    if (!text || busy) return;
+    setDraft('');
+    setError(null);
+    // Store the pasted key in localStorage — never a server key in this bundle.
+    if (needsKey && apiKey.trim()) await mh.keystore?.set(providerId, apiKey.trim());
+    const history: ModelMessage[] = [...messages, { role: 'user', content: text }];
+    setMessages(history);
+    setBusy(true);
+    setPending('');
+    try {
+      const stream = await mh.stream({ provider: providerId, messages: history });
+      let acc = '';
+      for await (const chunk of stream) {
+        if (chunk.type === 'text-delta') {
+          acc += chunk.text;
+          setPending(acc);
+        } else if (chunk.type === 'finish') {
+          setMessages((prev) => [...prev, { role: 'assistant', content: acc }]);
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+      setPending('');
+    }
+  };
+
+  return (
+    <>
+      <p className="status">
+        direct: {provider.name} · model: {provider.model} · key stored in localStorage only
+      </p>
+
+      <div className="row">
+        <select value={providerId} onChange={(e) => setProviderId(e.target.value)} aria-label="Provider">
+          {DIRECT_PROVIDERS.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        {needsKey && (
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder={`${provider.name} API key`}
+            aria-label="API key"
+          />
+        )}
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {messages.map((m, i) => <Message key={i} m={m} />)}
+        {pending !== '' && <div className="msg assistant">{pending}</div>}
+      </div>
+
+      {error && <p className="status" style={{ color: '#dc2626' }}>⚠ {error}</p>}
+
+      <form onSubmit={submit}>
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={provider.id === 'mock' ? 'Try: "hello from the browser"' : 'Type a message…'}
+          disabled={busy}
+        />
+        <button type="submit" disabled={busy || !draft.trim()}>
+          {busy ? '…' : 'Send'}
+        </button>
+        <button type="button" onClick={() => setMessages([])} disabled={busy}>Clear</button>
+      </form>
+    </>
   );
 }
 

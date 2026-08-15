@@ -12,8 +12,11 @@ export default defineConfig({
       // Point the package name at the workspace source so the example runs
       // without building/publishing first. Published consumers import
       // `modelhitch` and `modelhitch/react` from node_modules instead.
-      modelhitch: path.resolve(root, '../../src/index.ts'),
+      // The browser entry proves the web build stays free of Node-only modules.
+      // Order matters: Vite matches aliases in order (first match wins), so
+      // the more specific `modelhitch/react` must come before `modelhitch`.
       'modelhitch/react': path.resolve(root, '../../src/react/index.ts'),
+      modelhitch: path.resolve(root, '../../src/browser.ts'),
     },
   },
   server: {
