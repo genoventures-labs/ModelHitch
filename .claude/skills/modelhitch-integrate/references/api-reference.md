@@ -43,6 +43,13 @@ Useful methods are `chat`, `stream`, `streamToResult`, `provider`, `capabilities
 | `groq` | `GROQ_API_KEY` |
 | `openrouter` | `OPENROUTER_API_KEY` |
 | `together` | `TOGETHER_API_KEY` |
+| `huggingface` | `HF_TOKEN` |
+| `gemini` | `GEMINI_API_KEY` |
+| `deepseek` | `DEEPSEEK_API_KEY` |
+| `xai` | `XAI_API_KEY` |
+| `mistral` | `MISTRAL_API_KEY` |
+| `moonshot` | `MOONSHOT_API_KEY` |
+| `zai` | `ZAI_API_KEY` |
 | `lmstudio`, `ollama`, `vllm`, `llamacpp`, `koboldcpp`, `mock` | None by default |
 
 OpenCode Zen chooses its upstream protocol by model family: GPT/Grok use Responses, Claude/Qwen use Anthropic Messages, Gemini uses GenerateContent, and other models use chat completions.

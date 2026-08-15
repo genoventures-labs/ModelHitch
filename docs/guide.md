@@ -58,6 +58,13 @@ the server. Never put a server credential in a browser bundle.
 | Groq | `GROQ_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
 | Together | `TOGETHER_API_KEY` |
+| HuggingFace | `HF_TOKEN` |
+| Google Gemini | `GEMINI_API_KEY` |
+| DeepSeek | `DEEPSEEK_API_KEY` |
+| xAI | `XAI_API_KEY` |
+| Mistral | `MISTRAL_API_KEY` |
+| Moonshot | `MOONSHOT_API_KEY` |
+| Z.ai (GLM) | `ZAI_API_KEY` |
 
 Local providers and `mock` require no key by default.
 

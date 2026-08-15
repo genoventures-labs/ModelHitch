@@ -1,11 +1,16 @@
 import type { Provider } from './providers/types.js';
 import {
   anthropic,
+  deepseek,
+  gemini,
   groq,
+  huggingface,
   koboldcpp,
   llamacpp,
   lmstudio,
+  mistral,
   mockProvider,
+  moonshot,
   ollama,
   openai,
   opencodeGo,
@@ -13,6 +18,8 @@ import {
   openrouter,
   together,
   vllm,
+  xai,
+  zai,
 } from './providers/index.js';
 
 /** The providers that ship with ModelHitch out of the box. */
@@ -24,6 +31,13 @@ export const defaultProviders: Provider[] = [
   groq,
   openrouter,
   together,
+  huggingface,
+  gemini,
+  deepseek,
+  xai,
+  mistral,
+  moonshot,
+  zai,
   lmstudio,
   ollama,
   vllm,

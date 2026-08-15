@@ -1,6 +1,6 @@
 {
   "name": "modelhitch",
-  "version": "0.11.2",
+  "version": "0.12.0",
   "description": "Plug-and-play BYOK integration layer — hitch any AI provider or model to your app.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -61,6 +61,13 @@
     "anthropic",
     "ollama",
     "groq",
+    "huggingface",
+    "gemini",
+    "deepseek",
+    "xai",
+    "mistral",
+    "moonshot",
+    "zai",
     "openrouter"
   ],
   "license": "MIT",

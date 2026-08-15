@@ -63,6 +63,105 @@ export const together: Provider = createOpenAICompatibleProvider({
   },
 });
 
+export const huggingface: Provider = createOpenAICompatibleProvider({
+  id: 'huggingface',
+  name: 'HuggingFace',
+  baseUrl: 'https://router.huggingface.co/v1',
+  defaultModel: 'Qwen/Qwen2.5-72B-Instruct',
+  apiKeyEnvVar: 'HF_TOKEN',
+  capabilities: {
+    streaming: true,
+    toolCalling: true,
+    vision: true,
+    embeddings: false,
+    maxContextTokens: 128_000,
+  },
+});
+
+export const gemini: Provider = createOpenAICompatibleProvider({
+  id: 'gemini',
+  name: 'Google Gemini',
+  baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+  defaultModel: 'gemini-3.7-flash',
+  apiKeyEnvVar: 'GEMINI_API_KEY',
+  capabilities: {
+    streaming: true,
+    toolCalling: true,
+    vision: true,
+    embeddings: false,
+    maxContextTokens: 1_000_000,
+  },
+});
+
+export const deepseek: Provider = createOpenAICompatibleProvider({
+  id: 'deepseek',
+  name: 'DeepSeek',
+  baseUrl: 'https://api.deepseek.com',
+  defaultModel: 'deepseek-v4-pro',
+  apiKeyEnvVar: 'DEEPSEEK_API_KEY',
+  capabilities: {
+    streaming: true,
+    toolCalling: true,
+    vision: false,
+    embeddings: false,
+    maxContextTokens: 1_000_000,
+  },
+});
+
+export const xai: Provider = createOpenAICompatibleProvider({
+  id: 'xai',
+  name: 'xAI (Grok)',
+  baseUrl: 'https://api.x.ai/v1',
+  defaultModel: 'grok-4.6',
+  apiKeyEnvVar: 'XAI_API_KEY',
+  capabilities: {
+    streaming: true,
+    toolCalling: true,
+    vision: true,
+    embeddings: false,
+    maxContextTokens: 500_000,
+  },
+});
+
+export const mistral: Provider = createOpenAICompatibleProvider({
+  id: 'mistral',
+  name: 'Mistral',
+  baseUrl: 'https://api.mistral.ai/v1',
+  defaultModel: 'mistral-medium-3-5',
+  apiKeyEnvVar: 'MISTRAL_API_KEY',
+  capabilities: {
+    streaming: true,
+    toolCalling: true,
+    vision: true,
+    embeddings: false,
+    maxContextTokens: 256_000,
+  },
+});
+
+export const moonshot: Provider = createOpenAICompatibleProvider({
+  id: 'moonshot',
+  name: 'Moonshot (Kimi)',
+  baseUrl: 'https://api.moonshot.ai/v1',
+  defaultModel: 'kimi-k3',
+  apiKeyEnvVar: 'MOONSHOT_API_KEY',
+  capabilities: {
+    streaming: true,
+    toolCalling: true,
+    vision: true,
+    embeddings: false,
+    maxContextTokens: 1_000_000,
+  },
+});
+
+export const zai: Provider = createOpenAICompatibleProvider({
+  id: 'zai',
+  name: 'Z.ai (GLM)',
+  baseUrl: 'https://api.z.ai/api/paas/v4/',
+  defaultModel: 'glm-5.2',
+  apiKeyEnvVar: 'ZAI_API_KEY',
+  capabilities: { streaming: true, toolCalling: true, vision: false, embeddings: false, maxContextTokens: 1_000_000 },
+});
+
 /** LM Studio — fully local, no key required. */
 export const lmstudio: Provider = createOpenAICompatibleProvider({
   id: 'lmstudio',

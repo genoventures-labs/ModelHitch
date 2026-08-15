@@ -91,7 +91,7 @@ or `--force` to update an existing install.
 ### Providers
 
 `OpenCode Zen` · `OpenCode Go` · `OpenAI` · `Anthropic` · `Groq` · `OpenRouter` ·
-`Together AI` · `LM Studio` · `Ollama` · `vLLM` · `llama.cpp` · `KoboldCpp` · `mock`
+`Together AI` · `HuggingFace` · `Google Gemini` · `DeepSeek` · `xAI` · `Mistral` · `Moonshot` · `Z.ai (GLM)` · `LM Studio` · `Ollama` · `vLLM` · `llama.cpp` · `KoboldCpp` · `mock`
 
 ## Local agent bridge
 
