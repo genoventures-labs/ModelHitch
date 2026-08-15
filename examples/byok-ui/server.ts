@@ -1,5 +1,7 @@
 /**
- * Zero-config local bridge for the BYOK UI demo.
+ * Zero-config local bridge for the BYOK UI demo — the "backend" half of the
+ * bridge pattern. Uses only the published `modelhitch` package (Node entry):
+ * no source aliases, so this example proves the real npm artifact end-to-end.
  *
  * Run: npm run server   (in examples/byok-ui)
  * Then: npm run dev     (in examples/byok-ui)
@@ -9,7 +11,7 @@
  * any real provider the bridge routes — e.g. start the studio bridge
  * (`npm run bridge` at the repo root) and use model "opencode-zen/big-pickle".
  */
-import { createModelHitchServer, mockProvider } from '../../src/index.js';
+import { createModelHitchServer, mockProvider } from 'modelhitch';
 
 const server = createModelHitchServer({
   providers: [mockProvider],

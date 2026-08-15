@@ -164,10 +164,18 @@ function DirectChat() {
     e.preventDefault();
     const text = draft.trim();
     if (!text || busy) return;
+    if (needsKey && !apiKey.trim()) {
+      setError(`Paste a ${provider.name} API key above — direct BYOK calls the provider straight from the browser.`);
+      return;
+    }
     setDraft('');
     setError(null);
-    // Store the pasted key in localStorage — never a server key in this bundle.
-    if (needsKey && apiKey.trim()) await mh.keystore?.set(providerId, apiKey.trim());
+    // Store the pasted key in localStorage (or clear it when emptied) — never
+    // a server key in this bundle.
+    if (needsKey) {
+      if (apiKey.trim()) await mh.keystore?.set(providerId, apiKey.trim());
+      else await mh.keystore?.delete(providerId);
+    }
     const history: ModelMessage[] = [...messages, { role: 'user', content: text }];
     setMessages(history);
     setBusy(true);

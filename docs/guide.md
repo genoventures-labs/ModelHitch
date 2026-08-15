@@ -142,7 +142,10 @@ const chat = useChat({
 ```
 
 `useStream` handles a single streaming turn; `createBridgeClient` provides the lower-level client.
-See the runnable [BYOK UI](../examples/byok-ui).
+The runnable [BYOK UI](../examples/byok-ui) is a reference template: it runs against the published
+`modelhitch@^0.14` npm package (no source aliases) and has its own
+[README](../examples/byok-ui/README.md) covering both integration patterns, the security model, and
+how to adapt it to a new project.
 
 ## Local agent bridge
 
