@@ -94,6 +94,8 @@ npx modelhitch stop
 
 Use `http://127.0.0.1:3939/v1` for OpenAI-style clients and `http://127.0.0.1:3939` for clients that append their own Anthropic or Gemini paths.
 
+Clients that mandate a nonempty `apiKey` field (for example, the official `openai` SDK or IDE agents) can be given any harmless bridge-local placeholder such as `sk-bridge-local`. The bridge resolves credentials locally and ignores the incoming Authorization header, so the placeholder is never sent upstream. Never use a real user key.
+
 ## Stable error codes
 
 Handle `missing-api-key`, `invalid-api-key`, `rate-limited`, `model-not-found`, `provider-not-found`, `provider-error`, `network-error`, and `bad-request` through `ModelHitchError.code`.

@@ -176,6 +176,12 @@ Use `http://127.0.0.1:3939/v1` for OpenAI-style clients and
 `http://127.0.0.1:3939` for clients that append Anthropic or Gemini paths. Route explicit models as
 `providerId/modelId`; bare IDs use the default provider.
 
+Some OpenAI-compatible clients (for example, the official `openai` SDK and IDE agents) require a
+nonempty `apiKey` field before they will send a request. The bridge resolves credentials locally
+and ignores the incoming Authorization header, so you can supply any harmless bridge-local
+placeholder such as `sk-bridge-local` — never a real user key — solely to satisfy that client-side
+validation.
+
 Environment controls:
 
 | Variable | Default | Purpose |
