@@ -24,11 +24,66 @@ export {
   maxAttemptsFor,
   withFailover,
   withFailoverStream,
+  ExhaustedError,
+  isExhaustedError,
   type AutoModeOptions,
+  type ExhaustionInfo,
+  type FailoverContext,
   type FailoverEvent,
   type FailoverTarget,
   type FailoverErrorInfo,
+  type LaneAttempt,
+  type LaneCooldown,
 } from './core/failover.js';
+
+// circuit breaker (Milestone 3) — threshold health per lane
+export { CircuitBreaker, type CircuitBreakerOptions, type LaneHealth, type LaneHealthState } from './core/circuit-breaker.js';
+
+// policy-driven routing (Milestone 1)
+export {
+  createRegistrySource,
+  resolvePolicyLanes,
+  validatePolicy,
+  type BackoffOptions,
+  type Policy,
+  type PolicyValidation,
+  type ProviderSource,
+  type TrustListEntry,
+} from './core/policy.js';
+
+// lane cooling / Retry-After handling
+export { MemoryLaneCooldown, type MemoryLaneCooldownOptions } from './core/cooldown.js';
+export { parseRetryAfter } from './core/headers.js';
+
+// models.dev catalog integration (Milestone 2) — consumes mdev-sdk
+export { createCatalogSource, isCallableProvider } from './catalog/source.js';
+export type {
+  CatalogModelMeta,
+  CatalogProviderMeta,
+  CatalogSource,
+  CatalogSourceOptions,
+  CatalogUsability,
+} from './catalog/source.js';
+
+// settings surface (Milestone 5) — serializable config + shared helpers
+export {
+  buildCatalogOptions,
+  buildCooldownFromConfig,
+  isMaskedSecret,
+  maskSecret,
+  policyFromConfig,
+  serializeConfig,
+  validateConfig,
+  validateConfigWithSource,
+  CONFIG_VERSION,
+  type CatalogConfig,
+  type CooldownConfig,
+  type ConfigValidation,
+  type MaskedConfig,
+  type ModelHitchConfig,
+} from './config.js';
+export { defaultConfigTemplate, initConfigFile, readConfigFile, writeConfigFile } from './config-file.js';
+
 export { UsageTracker, usageDashboardHtml } from './core/usage.js';
 export { SqliteUsageStorage, type UsageStorage } from './core/usage-storage.js';
 export type {

@@ -33,10 +33,50 @@ import {
   stopBackground,
   waitForReady,
 } from './daemon.js';
+import {
+  createCatalogSource,
+  type CatalogSource,
+} from './catalog/source.js';
+import {
+  buildCatalogOptions,
+  buildCooldownFromConfig,
+  isMaskedSecret,
+  policyFromConfig,
+  serializeConfig,
+  validateConfigWithSource,
+} from './config.js';
+import {
+  defaultConfigPath,
+  initConfigFile,
+  readConfigFile,
+  writeConfigFile,
+} from './config-file.js';
+import type { ModelHitchConfig } from './config.js';
+import { MemoryKeyStore } from './storage/memory.js';
+import { CircuitBreaker } from './core/circuit-breaker.js';
+import type { LaneCooldown } from './core/failover.js';
+import type { Provider } from './providers/types.js';
+import { defaultProviders } from './registry.js';
 
 const VERSION = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
 ).version as string;
+
+/** Read the value of `--flag` from the process args, or undefined. */
+function flagValue(flag: string): string | undefined {
+  const i = process.argv.indexOf(flag);
+  if (i === -1) return undefined;
+  const value = process.argv[i + 1];
+  return value && !value.startsWith('--') ? value : undefined;
+}
+
+/** Read the value of `--flag` from a local args array, or undefined. */
+function argValue(args: string[], flag: string): string | undefined {
+  const i = args.indexOf(flag);
+  if (i === -1) return undefined;
+  const value = args[i + 1];
+  return value && !value.startsWith('--') ? value : undefined;
+}
 
 function usage(): void {
   console.log(`ModelHitch v${VERSION} — plug-and-play BYOK integration layer.
@@ -74,21 +114,121 @@ async function runBridge(): Promise<void> {
   const port = Number(process.env.MODELHITCH_PORT ?? 3939);
   const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
   const maxBodyBytes = Number(process.env.MODELHITCH_MAX_BODY_BYTES ?? 64 * 1024 * 1024);
+  const configPath = flagValue('--config') ?? defaultConfigPath();
+
+  const loaded = readConfigFile(configPath); // null when none exists yet
+  if (loaded) {
+    const { errors } = validateConfigWithSource(loaded);
+    if (errors.length) {
+      console.error(`Config ${configPath} is invalid:\n  - ${errors.join('\n  - ')}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  const config: ModelHitchConfig =
+    loaded ?? { version: 1, defaultProviderId: 'opencode-zen', policy: { trusted: [{ providerId: 'opencode-zen', models: ['big-pickle'] }], fallback: [{ providerId: 'opencode-go', models: ['deepseek-v4-flash'] }] } };
+
+  // Catalog mode: warm the models.dev source, build the executable provider set.
+  let catalogSource: CatalogSource | undefined;
+  let providers: Provider[] = defaultProviders;
+  let keystore = new MemoryKeyStore();
+  const cooldown: LaneCooldown | undefined = buildCooldownFromConfig(config);
+  const configCatalog = buildCatalogOptions(config);
+  if (configCatalog || config.catalog !== undefined) {
+    const src = createCatalogSource({ ...configCatalog, registry: defaultProviders });
+    try {
+      await src.warm();
+      catalogSource = src;
+      providers = src.providers();
+    } catch (err) {
+      console.error(`Failed to load the models.dev catalog: ${(err as Error).message}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
 
   const server = createModelHitchServer({
-    defaultProviderId: 'opencode-zen',
+    providers,
+    defaultProviderId: config.defaultProviderId ?? 'opencode-zen',
+    defaultModel: config.defaultModel,
     staticModels: {
       'opencode-zen': [...OPENCODE_ZEN_MODELS],
       'opencode-go': [...OPENCODE_GO_MODELS],
     },
     maxBodyBytes,
-    autoMode: true,
+    policy: policyFromConfig(config),
+    cooldown,
+    catalogSource,
+    keystore,
+    // Keys from the config file are available from the very first request —
+    // no Apply needed for keys already stored locally.
+    apiKeys: config.keys,
     usagePersistence: true,
     logger: (line) => console.log(line),
     onFailover: (event) =>
       console.log(
-        `[auto-mode] ${event.from.providerId}/${event.from.model} -> ${event.to.providerId}/${event.to.model} (${event.error.code}${event.error.status ? ` HTTP ${event.error.status}` : ''})`,
+        `[failover] ${event.from.providerId}/${event.from.model} -> ${event.to.providerId}/${event.to.model} (${event.error.code}${event.error.status ? ` HTTP ${event.error.status}` : ''})`,
       ),
+    // Settings surface: read the (masked) document, validate + persist + apply.
+    configBridge: {
+      getConfig: () => serializeConfig(config, { maskSecrets: true }),
+      updateConfig: async (next: unknown) => {
+        const asConfig = next as ModelHitchConfig;
+        const { errors } = validateConfigWithSource(asConfig, catalogSource);
+        if (errors.length) return { ok: false, errors };
+        // Never persist a masked placeholder back as a real key (a client that
+        // echoes the masked value we handed out would otherwise silently
+        // overwrite the user's real key). Plaintext is accepted; masked blobs
+        // fall back to the previously-stored value.
+        const keys = asConfig.keys ?? {};
+        for (const [providerId, value] of Object.entries(keys)) {
+          if (isMaskedSecret(value)) {
+            delete keys[providerId];
+            const prev = (config.keys ?? {})[providerId];
+            if (prev && !isMaskedSecret(prev)) keys[providerId] = prev;
+          }
+        }
+        // Persist the full document (keys included) to the config file.
+        try {
+          writeConfigFile(configPath, asConfig);
+        } catch (err) {
+          return { ok: false, errors: [`Failed to write ${configPath}: ${(err as Error).message}`] };
+        }
+        // Apply immediately — hot reload.
+        Object.assign(config, asConfig);
+        try {
+          const nextCatalog = buildCatalogOptions(config);
+          const wantsCatalog = config.catalog !== undefined;
+          if (wantsCatalog && !catalogSource) {
+            const src = createCatalogSource({ ...nextCatalog, registry: defaultProviders });
+            await src.warm();
+            catalogSource = src;
+            server.reconfigure({
+              providers: src.providers(),
+              policy: policyFromConfig(config),
+              cooldown: buildCooldownFromConfig(config) ?? (catalogSource ? new CircuitBreaker() : undefined),
+              catalogSource: src,
+              apiKeys: config.keys,
+              defaultProviderId: config.defaultProviderId,
+              defaultModel: config.defaultModel,
+            });
+          } else {
+            server.reconfigure({
+              providers: catalogSource ? catalogSource.providers() : providers,
+              policy: policyFromConfig(config),
+              cooldown: buildCooldownFromConfig(config) ?? (catalogSource ? new CircuitBreaker() : undefined),
+              apiKeys: config.keys,
+              baseUrls: config.catalog?.baseUrls,
+              defaultProviderId: config.defaultProviderId,
+              defaultModel: config.defaultModel,
+            });
+          }
+        } catch (err) {
+          return { ok: false, errors: [`Failed to apply config: ${(err as Error).message}`] };
+        }
+        return { ok: true };
+      },
+    },
   });
 
   const { url } = await server.listen(port, host);
@@ -100,19 +240,13 @@ Cursor, Codex CLI, Claude Code, Gemini CLI, ...) at:
   Base URL:   ${url}/v1
   API key:    any value (keys are resolved locally, never sent out)
 
-Models: providerId/modelId from the /v1/models catalog, e.g.
-  opencode-zen/big-pickle        (requires OPENCODE_ZEN_API_KEY)
-  opencode-go/deepseek-v4-flash  (requires OPENCODE_GO_API_KEY)
-  mock/mock-model                (no key — deterministic demo)
-
-auto-mode: ON — 429/5xx/network failures fail over to
-  opencode-go/deepseek-v4-flash -> opencode-zen/big-pickle ->
-  opencode-zen/deepseek-v4-flash-free -> opencode-zen/mimo-v2.5-free
+Settings (local — no env digging):
+  ${configPath}
+  open ${url}/settings in a browser
 
 Usage telemetry (persisted to ./modelhitch-usage.db):
   JSON:       curl ${url}/v1/usage
   Dashboard:  open ${url}/usage in a browser
-  Reset:      curl -X POST ${url}/v1/usage/reset
 
 Press Ctrl+C to stop.`);
 }
@@ -237,6 +371,23 @@ function runSetup(args: string[]): void {
   if (!dryRun) console.log('\nRestart the agent or open a new session so it discovers the skill.');
 }
 
+async function runConfig(args: string[]): Promise<void> {
+  const path = argValue(args, '--path') ?? defaultConfigPath();
+  if (args.includes('init')) {
+    const { created } = initConfigFile(path);
+    console.log(created ? `Created ${path}` : `Already exists: ${path}`);
+    return;
+  }
+  // Default: print the masked config path + contents.
+  console.log(`config: ${path}`);
+  const existing = readConfigFile(path);
+  if (!existing) {
+    console.log('  (none yet — run `modelhitch config init` or open the settings page)');
+    return;
+  }
+  console.log(JSON.stringify(serializeConfig(existing, { maskSecrets: true }), null, 2));
+}
+
 async function main(): Promise<void> {
   printAsciiLogo();
   const args = process.argv.slice(2);
@@ -269,6 +420,9 @@ async function main(): Promise<void> {
       break;
     case 'setup':
       runSetup(args.slice(1));
+      break;
+    case 'config':
+      await runConfig(args.slice(1));
       break;
     default:
       console.log(`Unknown command: ${cmd}\n`);

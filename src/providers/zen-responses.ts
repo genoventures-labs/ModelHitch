@@ -1,4 +1,5 @@
 import { ModelHitchError } from '../core/errors.js';
+import { parseRetryAfter } from '../core/headers.js';
 import type {
   Capabilities,
   ChatParams,
@@ -306,7 +307,7 @@ export class ZenResponsesProvider implements Provider {
     const text = await res.text();
     if (!res.ok) {
       this.debugLog('<- HTTP', res.status, text);
-      throw mapHTTPError(res.status, this.id, text);
+      throw mapHTTPError(res.status, this.id, text, parseRetryAfter(res.headers.get('retry-after')));
     }
     const data = safeJsonParse<ResponsesBody>(text, {});
     const { content, toolCalls } = fromOutput(data.output);
@@ -327,7 +328,7 @@ export class ZenResponsesProvider implements Provider {
     if (!res.ok) {
       const text = await res.text();
       this.debugLog('<- HTTP', res.status, text);
-      throw mapHTTPError(res.status, this.id, text);
+      throw mapHTTPError(res.status, this.id, text, parseRetryAfter(res.headers.get('retry-after')));
     }
     const body = requireBody(res, this.id);
     // Maps Responses item ids (item_id on arg deltas) -> tool call ids.

@@ -25,6 +25,8 @@ export interface FailoverErrorInfo {
   code: ModelHitchErrorCode | 'unknown';
   message: string;
   status?: number;
+  /** Milliseconds the provider asked us to wait (Retry-After), when known. */
+  retryAfterMs?: number;
 }
 
 export interface FailoverEvent {
@@ -97,7 +99,13 @@ export function isCredentialError(err: unknown): boolean {
 }
 
 export function errorInfo(err: unknown): FailoverErrorInfo {
-  if (err instanceof ModelHitchError) return { code: err.code, message: err.message, status: err.status };
+  if (err instanceof ModelHitchError)
+    return {
+      code: err.code,
+      message: err.message,
+      status: err.status,
+      retryAfterMs: err.retryAfterMs,
+    };
   if (err instanceof Error) return { code: 'unknown', message: err.message };
   return { code: 'unknown', message: String(err) };
 }
@@ -135,16 +143,121 @@ export function maxAttemptsFor(opts: AutoModeOptions | boolean | undefined, lane
   return opts === true ? laneCount + 1 : (opts.maxAttempts ?? laneCount + 1);
 }
 
+/**
+ * Per-lane cooling, consumed by the failover loops. `MemoryLaneCooldown`
+ * cools on failure (Retry-After aware); `CircuitBreaker` (Milestone 3)
+ * adds consecutive-failure thresholds, escalating trip windows, and
+ * half-open probing. When absent, lanes are never skipped and failures
+ * never cool anything — this is the pre-Milestone-1 behavior.
+ */
+export interface LaneCooldown {
+  /** Remaining ms the lane should be skipped; 0 = usable (half-open). */
+  cooldownMs(lane: FailoverTarget): number;
+  /**
+   * Record a failure and cool the lane. Accepts either a raw Retry-After
+   * duration (ms) or the normalized failure info the failover loop reports.
+   */
+  cool(lane: FailoverTarget, retryAfterMsOrError?: number | FailoverErrorInfo): void;
+  /**
+   * Optional: a lane succeeded. Implementations reset health state. The
+   * failover loop calls this through `FailoverContext.onSuccess`.
+   */
+  success?(lane: FailoverTarget): void;
+}
+
+/** One lane's failure during a walk that bottomed out. */
+export interface LaneAttempt {
+  target: FailoverTarget;
+  error: FailoverErrorInfo;
+}
+
+/** Everything we know when every lane has failed (or was skipped). */
+export interface ExhaustionInfo {
+  /** The full ordered target list for the walk. */
+  targets: FailoverTarget[];
+  /** Failures that actually occurred, in walk order. */
+  attempts: LaneAttempt[];
+  /** The first error — the lane the user actually configured. */
+  firstError: unknown;
+}
+
+/**
+ * The terminal error of a bottomed-out walk (Milestone 4). Extends
+ * `ModelHitchError` and PRESERVES the first error's code, message, status,
+ * and Retry-After so existing "rethrow the first error" contracts hold —
+ * callers detect the bottom-out via `isExhaustedError` / `instanceof` and
+ * read `info` for per-lane diagnostics.
+ */
+export class ExhaustedError extends ModelHitchError {
+  readonly info: ExhaustionInfo;
+  /** Ordered lane list with the failure each lane produced (attempts may be empty). */
+  readonly lanes: LaneAttempt[];
+
+  constructor(
+    firstError: unknown,
+    info: ExhaustionInfo,
+    fallbackMessage = 'All failover lanes failed.',
+  ) {
+    const first = firstError instanceof ModelHitchError ? firstError : undefined;
+    // Preserve the message of ANY first error (plain Errors included), not
+    // just ModelHitchErrors — pre-M4 the final-lane error was rethrown as-is.
+    const message =
+      first?.message ??
+      (firstError instanceof Error ? firstError.message : fallbackMessage);
+    super(first?.code ?? 'provider-error', message, {
+      status: first?.status,
+      providerId: first?.providerId,
+      retryAfterMs: first?.retryAfterMs,
+      cause: firstError,
+    });
+    this.name = 'ExhaustedError';
+    this.info = info;
+    this.lanes = info.attempts;
+  }
+}
+
+/** Narrow a caught error to an exhausted walk (`ExhaustedError`). */
+export function isExhaustedError(err: unknown): err is ExhaustedError {
+  return err instanceof ExhaustedError;
+}
+
 export interface FailoverContext {
   codes?: readonly ModelHitchErrorCode[];
   maxAttempts?: number;
   onFailover?: (event: FailoverEvent) => void;
+  /**
+   * When provided, cooled lanes are skipped without attempting, and a
+   * retryable failure cools the failed lane (Retry-After aware) so future
+   * requests don't re-walk it. Default: none — instant failover, no memory.
+   */
+  cooldown?: LaneCooldown;
+  /** Called when a lane succeeds — resets circuit-breaker state (M3). */
+  onSuccess?: (target: FailoverTarget) => void;
+  /**
+   * Opt-in wait before switching lanes. Returns ms to wait (or `undefined`
+   * for instant). Honor Retry-After here — never wait *below* what the
+   * provider asked for. Default: undefined — instant failover.
+   */
+  delayMsBeforeFailover?: (from: FailoverTarget, err: unknown, attempt: number) => number | undefined;
+  /** Called when the walk bottomed out — the "limited on all endpoints" signal. */
+  onExhausted?: (info: ExhaustionInfo) => void;
+}
+
+/** Small await helper kept inline so tests can pass 0/undefined delays. */
+function sleep(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 }
 
 /**
  * Non-stream: try each target until one resolves. If every lane fails without
  * producing a result, the FIRST error is rethrown — that's the lane the user
  * actually configured, and it's the actionable one (e.g. the original 429).
+ *
+ * Cooldown behavior (opt-in via `ctx.cooldown`): lanes on cooldown are
+ * skipped without attempting, and a retryable failure cools the failed lane
+ * (Retry-After aware). Combined with `delayMsBeforeFailover`, the default
+ * remains instant failover — this library never sits and stares at a
+ * rate-limit response unless the caller opted in.
  */
 export async function withFailover<T, L extends FailoverTarget>(
   targets: L[],
@@ -153,16 +266,46 @@ export async function withFailover<T, L extends FailoverTarget>(
 ): Promise<{ value: T; target: L }> {
   const codes = ctx.codes ?? DEFAULT_RETRYABLE_CODES;
   const maxAttempts = ctx.maxAttempts ?? targets.length;
+  const attempts: LaneAttempt[] = [];
   let firstError: unknown;
-  for (let i = 0; i < targets.length && i < maxAttempts; i++) {
+  let i = 0;
+
+  while (i < targets.length && i < maxAttempts) {
     const target = targets[i]!;
+    if (ctx.cooldown && ctx.cooldown.cooldownMs(target) > 0) {
+      i++; // cooled lane — skip without attempting
+      continue;
+    }
     try {
-      return { value: await attempt(target), target };
+      const value = await attempt(target);
+      ctx.onSuccess?.(target);
+      return { value, target };
     } catch (err) {
-      if (i >= targets.length - 1 || i >= maxAttempts - 1) throw firstError ?? err;
-      if (isCredentialError(err)) continue; // no key for this lane — try the next
+      attempts.push({ target, error: errorInfo(err) });
+      const last = i >= targets.length - 1 || i >= maxAttempts - 1;
+      if (last) {
+        // Preserve the documented contract: on an exhausted walk, surface the
+        // FIRST error — the lane the user actually configured — even if the
+        // final lane failed with a non-retryable error. Also honor cooling
+        // for a final retryable failure (e.g. 429 with Retry-After) so the
+        // NEXT request doesn't immediately re-walk a lane its provider told
+        // us to leave alone (the "bottomed out" state is then reported via
+        // onExhausted/ExhaustedError rather than silently re-hammered).
+        firstError ??= err;
+        if (isRetryableError(err, codes)) {
+          ctx.cooldown?.cool(target, errorInfo(err));
+        }
+        break;
+      }
+      if (isCredentialError(err)) {
+        i++;
+        continue; // no key for this lane — silently try the next
+      }
       if (!isRetryableError(err, codes)) throw err;
       firstError ??= err;
+      ctx.cooldown?.cool(target, errorInfo(err));
+      const waitMs = ctx.delayMsBeforeFailover?.(target, err, i + 1);
+      await sleep(waitMs ?? 0);
       ctx.onFailover?.({
         at: new Date().toISOString(),
         from: target,
@@ -170,9 +313,17 @@ export async function withFailover<T, L extends FailoverTarget>(
         error: errorInfo(err),
         attempt: i + 1,
       });
+      i++;
     }
   }
-  throw firstError;
+
+  const exhaustion: ExhaustionInfo = { targets, attempts, firstError };
+  ctx.onExhausted?.(exhaustion);
+  throw new ExhaustedError(
+    firstError,
+    exhaustion,
+    attempts.length === 0 ? 'All failover lanes are on cooldown; no lane was attempted.' : undefined,
+  );
 }
 
 /**
@@ -188,26 +339,64 @@ export function withFailoverStream<T, L extends FailoverTarget>(
   const codes = ctx.codes ?? DEFAULT_RETRYABLE_CODES;
   const maxAttempts = ctx.maxAttempts ?? targets.length;
   return (async function* () {
+    const attempts: LaneAttempt[] = [];
     let firstError: unknown;
-    for (let i = 0; i < targets.length && i < maxAttempts; i++) {
+    let i = 0;
+    while (i < targets.length && i < maxAttempts) {
       const target = targets[i]!;
+      if (ctx.cooldown && ctx.cooldown.cooldownMs(target) > 0) {
+        i++; // cooled lane — skip without attempting
+        continue;
+      }
       let yielded = false;
       try {
+        let completed = false;
         for await (const value of attempt(target)) {
           yielded = true;
           yield value;
         }
+        completed = true;
+        if (completed) ctx.onSuccess?.(target);
         return; // clean completion
       } catch (err) {
-        if (i >= targets.length - 1 || i >= maxAttempts - 1) {
-          // Exhausted: surface the current error if content was already
-          // streamed, otherwise the original error.
-          throw yielded ? err : firstError ?? err;
+        attempts.push({ target, error: errorInfo(err) });
+        const last = i >= targets.length - 1 || i >= maxAttempts - 1;
+        if (last) {
+          if (yielded) {
+            // Content already sent from the final lane — never duplicate;
+            // surface THIS lane's error, and cool it so the next request
+            // doesn't immediately re-walk it.
+            if (isRetryableError(err, codes)) {
+              ctx.cooldown?.cool(target, errorInfo(err));
+            }
+            throw err;
+          }
+          // Preserve the documented contract: on an exhausted walk surface the
+          // FIRST error — the lane the user actually configured — even if the
+          // final lane failed with a non-retryable error. Also honor cooling
+          // for a final retryable failure (e.g. 429 with Retry-After) so the
+          // NEXT request doesn't immediately re-walk a lane on cooldown.
+          firstError ??= err;
+          if (isRetryableError(err, codes)) {
+            ctx.cooldown?.cool(target, errorInfo(err));
+          }
+          break;
         }
-        if (isCredentialError(err)) continue;
+        if (isCredentialError(err)) {
+          i++;
+          continue; // no key for this lane — silently try the next
+        }
         if (!isRetryableError(err, codes)) throw err;
-        if (yielded) throw err; // content already sent — never duplicate
+        if (yielded) {
+          // Content already sent — never duplicate. Still cool the lane so
+          // the NEXT request doesn't immediately re-walk a dying endpoint.
+          ctx.cooldown?.cool(target, errorInfo(err));
+          throw err;
+        }
         firstError ??= err;
+        ctx.cooldown?.cool(target, errorInfo(err));
+        const waitMs = ctx.delayMsBeforeFailover?.(target, err, i + 1);
+        await sleep(waitMs ?? 0);
         ctx.onFailover?.({
           at: new Date().toISOString(),
           from: target,
@@ -215,8 +404,15 @@ export function withFailoverStream<T, L extends FailoverTarget>(
           error: errorInfo(err),
           attempt: i + 1,
         });
+        i++;
       }
     }
-    throw firstError;
+    ctx.onExhausted?.({ targets, attempts, firstError });
+    const exhaustion: ExhaustionInfo = { targets, attempts, firstError };
+    throw new ExhaustedError(
+      firstError,
+      exhaustion,
+      attempts.length === 0 ? 'All failover lanes are on cooldown; no lane was attempted.' : undefined,
+    );
   })();
 }

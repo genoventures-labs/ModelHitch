@@ -1,4 +1,5 @@
 import { ModelHitchError } from '../core/errors.js';
+import { parseRetryAfter } from '../core/headers.js';
 import type {
   Capabilities,
   ChatParams,
@@ -195,7 +196,12 @@ function truncate(text: string, max: number): string {
 }
 
 /** Map an HTTP status to a ModelHitchError with a friendly message. */
-export function mapHTTPError(status: number, providerId: string, bodyText: string): ModelHitchError {
+export function mapHTTPError(
+  status: number,
+  providerId: string,
+  bodyText: string,
+  retryAfterMs?: number,
+): ModelHitchError {
   const detail = bodyText ? ` (${truncate(bodyText, 300)})` : '';
   switch (status) {
     case 401:
@@ -212,6 +218,7 @@ export function mapHTTPError(status: number, providerId: string, bodyText: strin
       return new ModelHitchError('rate-limited', `Provider "${providerId}" rate limited the request.`, {
         status,
         providerId,
+        retryAfterMs,
       });
     case 404:
       return new ModelHitchError(
@@ -326,7 +333,7 @@ export class OpenAICompatibleProvider implements Provider {
   async chat(params: ChatParams, credentials: ProviderCredentials): Promise<ChatResult> {
     const res = await this.request('/chat/completions', params, credentials, this.buildBody(params, false));
     const text = await res.text();
-    if (!res.ok) throw mapHTTPError(res.status, this.id, text);
+    if (!res.ok) throw mapHTTPError(res.status, this.id, text, parseRetryAfter(res.headers.get('retry-after')));
     const data = safeJsonParse<OpenAIChatCompletion>(text, {});
     const choice = data.choices?.[0];
     const message = choice?.message;
@@ -353,7 +360,7 @@ export class OpenAICompatibleProvider implements Provider {
     const res = await this.request('/chat/completions', params, credentials, this.buildBody(params, true));
     if (!res.ok) {
       const text = await res.text();
-      throw mapHTTPError(res.status, this.id, text);
+      throw mapHTTPError(res.status, this.id, text, parseRetryAfter(res.headers.get('retry-after')));
     }
     const body = requireBody(res, this.id);
     const toolAcc = new Map<string, { id: string; name: string; args: string }>();
@@ -414,7 +421,7 @@ export class OpenAICompatibleProvider implements Provider {
       });
     }
     const text = await res.text();
-    if (!res.ok) throw mapHTTPError(res.status, this.id, text);
+    if (!res.ok) throw mapHTTPError(res.status, this.id, text, parseRetryAfter(res.headers.get('retry-after')));
     const data = safeJsonParse<{ data?: Array<{ id: string; name?: string; context_length?: number }> }>(text, {});
     return (data.data ?? []).map((m) => ({
       id: m.id,

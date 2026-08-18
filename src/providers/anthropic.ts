@@ -12,6 +12,7 @@ import type {
 } from '../core/types.js';
 import { bytesToBase64 } from '../core/base64.js';
 import { safeJsonParse } from '../core/json.js';
+import { parseRetryAfter } from '../core/headers.js';
 import { bodyToAsyncIterable, parseSSE, requireBody } from '../core/stream.js';
 import type { ModelInfo, Provider } from './types.js';
 
@@ -306,6 +307,7 @@ export class AnthropicProvider implements Provider {
         throw new ModelHitchError('rate-limited', err.error?.message ?? `Provider "${this.id}" rate limited the request.`, {
           status: res.status,
           providerId: this.id,
+          retryAfterMs: parseRetryAfter(res.headers.get('retry-after')),
         });
       }
       if (res.status === 404) {
@@ -350,9 +352,13 @@ export class AnthropicProvider implements Provider {
     const res = await this.request(params, credentials, this.buildBody(params, true, system, messages));
     if (!res.ok) {
       const text = await res.text();
+      // Stream path deliberately maps everything to bad-request with the
+      // status preserved (the status-429 check drives failover) — carry the
+      // Retry-After header along so cooldown/backoff honor it here too.
       throw new ModelHitchError('bad-request', `Provider "${this.id}" returned HTTP ${res.status}: ${text.slice(0, 300)}`, {
         status: res.status,
         providerId: this.id,
+        retryAfterMs: parseRetryAfter(res.headers.get('retry-after')),
       });
     }
     const body = requireBody(res, this.id);

@@ -12,6 +12,8 @@ export type ModelHitchErrorCode =
 export interface ModelHitchErrorOptions {
   status?: number;
   providerId?: string;
+  /** Milliseconds the provider asked us to wait (Retry-After header). */
+  retryAfterMs?: number;
   cause?: unknown;
 }
 
@@ -23,6 +25,7 @@ export class ModelHitchError extends Error {
   readonly code: ModelHitchErrorCode;
   readonly status?: number;
   readonly providerId?: string;
+  readonly retryAfterMs?: number;
 
   constructor(code: ModelHitchErrorCode, message: string, opts: ModelHitchErrorOptions = {}) {
     super(message, { cause: opts.cause });
@@ -30,6 +33,7 @@ export class ModelHitchError extends Error {
     this.code = code;
     this.status = opts.status;
     this.providerId = opts.providerId;
+    this.retryAfterMs = opts.retryAfterMs;
   }
 }
 

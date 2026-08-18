@@ -12,6 +12,7 @@ import type {
   Usage,
 } from '../core/types.js';
 import { safeJsonParse } from '../core/json.js';
+import { parseRetryAfter } from '../core/headers.js';
 import { bodyToAsyncIterable, parseSSE, requireBody } from '../core/stream.js';
 import type { ModelInfo, Provider } from './types.js';
 
@@ -312,7 +313,7 @@ export class ZenGeminiProvider implements Provider {
     }
   }
 
-  private mapError(status: number, text: string): ModelHitchError {
+  private mapError(status: number, text: string, retryAfterMs?: number): ModelHitchError {
     const err = safeJsonParse<GeminiResponse>(text, {});
     const detail = err.error?.message ?? '';
     const base = (message: string) => (detail ? `${message} (${detail})` : message);
@@ -327,6 +328,7 @@ export class ZenGeminiProvider implements Provider {
         return new ModelHitchError('rate-limited', base(`Provider "${this.id}" rate limited the request.`), {
           status,
           providerId: this.id,
+          retryAfterMs,
         });
       case 404:
         return new ModelHitchError('model-not-found', base(`Provider "${this.id}" could not find the model.`), {
@@ -374,7 +376,7 @@ export class ZenGeminiProvider implements Provider {
   async chat(params: ChatParams, credentials: ProviderCredentials): Promise<ChatResult> {
     const res = await this.request(params, credentials, this.buildBody(params, false), false);
     const text = await res.text();
-    if (!res.ok) throw this.mapError(res.status, text);
+    if (!res.ok) throw this.mapError(res.status, text, parseRetryAfter(res.headers.get('retry-after')));
     const data = safeJsonParse<GeminiResponse>(text, {});
     const candidate = data.candidates?.[0];
     const { content, toolCalls } = this.fromCandidate(candidate);
@@ -395,7 +397,7 @@ export class ZenGeminiProvider implements Provider {
     const res = await this.request(params, credentials, this.buildBody(params, true), true);
     if (!res.ok) {
       const text = await res.text();
-      throw this.mapError(res.status, text);
+      throw this.mapError(res.status, text, parseRetryAfter(res.headers.get('retry-after')));
     }
     const body = requireBody(res, this.id);
 

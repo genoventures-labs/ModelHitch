@@ -13,10 +13,24 @@ import {
   maxAttemptsFor,
   withFailover,
   withFailoverStream,
+  DEFAULT_RETRYABLE_CODES,
   type AutoModeOptions,
+  type ExhaustionInfo,
   type FailoverEvent,
   type FailoverTarget,
+  type LaneCooldown,
 } from '../core/failover.js';
+import {
+  createRegistrySource,
+  resolvePolicyLanes,
+  computeBackoffDelay,
+  type Policy,
+  type ProviderSource,
+} from '../core/policy.js';
+import { CircuitBreaker, type LaneHealth } from '../core/circuit-breaker.js';
+import { MemoryLaneCooldown } from '../core/cooldown.js';
+import type { CatalogSource } from '../catalog/source.js';
+import { settingsPageHtml } from '../settings-page.js';
 import { UsageTracker, usageDashboardHtml, type UsageEvent } from '../core/usage.js';
 import { SqliteUsageStorage } from '../core/usage-storage.js';
 import { mapFinishReasonOpenAI, mapRequest, routeModel, toChatCompletion, toOpenAIError, toUsageOutput } from './mapping.js';
@@ -85,8 +99,30 @@ export interface ModelHitchServerOptions {
    * errors (429 rate limits, 5xx, network blips). `true` uses the default
    * lineup (cheap Go model, then free Zen models); pass `AutoModeOptions` for
    * custom lanes/models. Applies to every wire, stream and non-stream.
+   * Mutually exclusive with `policy`.
    */
   autoMode?: AutoModeOptions | boolean;
+  /**
+   * Policy-driven routing (Milestone 1). The lane is the meaningful trust
+   * object. Higher-level than `autoMode` — configure one or the other, never
+   * both.
+   */
+  policy?: Policy;
+  /**
+   * Lane-health memory used when `policy` is set. Defaults to
+   * `MemoryLaneCooldown` (registry) / `CircuitBreaker` (when `catalogSource`
+   * is provided). The settings UI reads this via `GET /v1/lane-health`.
+   */
+  cooldown?: LaneCooldown;
+  /** Warmed models.dev catalog source (provider inventory + lane health). */
+  catalogSource?: CatalogSource;
+  /**
+   * Settings surface backing `GET/PUT /v1/config`. Implemented by the daemon:
+   * read the (masked) config, validate + persist + apply on update.
+   */
+  configBridge?: ConfigBridge;
+  /** Called when auto-mode walks every lane and work stops. */
+  onExhausted?: (info: ExhaustionInfo) => void;
   /** Called each time auto-mode switches lanes. */
   onFailover?: (event: FailoverEvent) => void;
   /**
@@ -105,6 +141,19 @@ export interface ModelHitchServerOptions {
 
 /** One completed inference request, as reported to the `onUsage` hook. */
 export type { UsageEvent } from '../core/usage.js';
+
+/**
+ * Settings surface implemented by the daemon (config file + hot reload).
+ * The server only proxies: GET returns the masked document, PUT validates
+ * + persists + applies. When absent, `/v1/config` returns an empty document
+ * and PUT returns 501.
+ */
+export interface ConfigBridge {
+  /** The masked config document (never contains plaintext keys). */
+  getConfig(): unknown;
+  /** Validate + persist + apply. Errors are shown verbatim in the settings UI. */
+  updateConfig(next: unknown): Promise<{ ok: boolean; errors?: string[] }>;
+}
 
 const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024; // images arrive as inline base64 — 10 MiB was too small
 
@@ -139,15 +188,32 @@ interface ResolvedLane extends FailoverTarget {
  * model ids go to the default provider.
  */
 export class OpenAICompatibleServer {
-  readonly providers: Provider[];
+  providers: Provider[];
   readonly options: ModelHitchServerOptions;
   private httpServer: Server | null = null;
   private usageTracker: UsageTracker;
   private ownsUsageTracker = false;
+  private policy: Policy | undefined;
+  private cooldown: LaneCooldown | undefined;
+  private source: ProviderSource;
+  private catalogSource: CatalogSource | undefined;
 
   constructor(options: ModelHitchServerOptions = {}) {
     this.options = options;
     this.providers = options.providers ?? defaultProviders;
+    this.catalogSource = options.catalogSource;
+    this.source = this.catalogSource ?? createRegistrySource(this.providers);
+    this.policy = options.policy;
+    if (options.policy && options.autoMode) {
+      throw new ModelHitchError(
+        'bad-request',
+        'Configure either "policy" or "autoMode", not both. Policy is the higher-level replacement.',
+        {},
+      );
+    }
+    if (this.policy) {
+      this.cooldown = options.cooldown ?? (this.catalogSource ? new CircuitBreaker() : new MemoryLaneCooldown());
+    }
     if (options.usageTracker) {
       this.usageTracker = options.usageTracker;
     } else if (options.usagePersistence) {
@@ -158,6 +224,55 @@ export class OpenAICompatibleServer {
     } else {
       this.usageTracker = new UsageTracker();
     }
+  }
+
+  /**
+   * Hot-reload the routing state (settings UI "Apply"). Providers, policy,
+   * keys, and health engine swap atomically by reference — in-flight requests
+   * finish on the state they started with.
+   */
+  reconfigure(partial: {
+    providers?: Provider[];
+    policy?: Policy;
+    autoMode?: AutoModeOptions | boolean;
+    cooldown?: LaneCooldown;
+    catalogSource?: CatalogSource;
+    apiKeys?: Record<string, string>;
+    baseUrls?: Record<string, string>;
+    defaultProviderId?: string;
+    defaultModel?: string;
+    keystore?: KeyStore;
+    staticModels?: Record<string, string[]>;
+  }): void {
+    if (partial.providers) this.providers = partial.providers;
+    if (partial.catalogSource !== undefined) {
+      this.catalogSource = partial.catalogSource;
+      this.source = this.catalogSource ?? createRegistrySource(this.providers);
+    } else if (partial.providers && !this.catalogSource) {
+      this.source = createRegistrySource(this.providers);
+    }
+    if (partial.policy !== undefined) {
+      if (partial.policy && this.options.autoMode) {
+        throw new ModelHitchError('bad-request', 'Cannot set a policy while autoMode is active.', {});
+      }
+      this.policy = partial.policy;
+      this.options.autoMode = partial.policy ? undefined : this.options.autoMode;
+    }
+    if (partial.autoMode !== undefined) {
+      if (partial.autoMode && this.policy) {
+        throw new ModelHitchError('bad-request', 'Cannot enable autoMode while a policy is active.', {});
+      }
+      this.options.autoMode = partial.autoMode;
+      if (partial.autoMode) this.policy = undefined;
+    }
+    if (partial.cooldown !== undefined) this.cooldown = partial.cooldown;
+    else if (partial.policy !== undefined) this.cooldown = this.catalogSource ? new CircuitBreaker() : new MemoryLaneCooldown();
+    if (partial.apiKeys !== undefined) this.options.apiKeys = partial.apiKeys;
+    if (partial.baseUrls !== undefined) this.options.baseUrls = partial.baseUrls;
+    if (partial.defaultProviderId !== undefined) this.options.defaultProviderId = partial.defaultProviderId;
+    if (partial.defaultModel !== undefined) this.options.defaultModel = partial.defaultModel;
+    if (partial.keystore !== undefined) this.options.keystore = partial.keystore;
+    if (partial.staticModels !== undefined) this.options.staticModels = partial.staticModels;
   }
 
   /** Start listening. `port` defaults to 0 (ephemeral). */
@@ -290,6 +405,74 @@ export class OpenAICompatibleServer {
       return;
     }
 
+    // Settings surface (Milestone 5): self-contained HTML UI + JSON endpoints.
+    if (method === 'GET' && path === '/settings') {
+      this.log(`${method} ${path} ->`);
+      this.cors(res);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(settingsPageHtml());
+      return;
+    }
+
+    if (method === 'GET' && path === '/v1/config') {
+      this.log(`${method} ${path} ->`);
+      const config = this.options.configBridge ? (this.options.configBridge.getConfig() as unknown) : {};
+      this.sendJson(res, 200, config);
+      return;
+    }
+
+    if (method === 'PUT' && path === '/v1/config') {
+      this.log(`${method} ${path} ->`);
+      if (!this.options.configBridge) {
+        this.sendJson(res, 501, { error: { message: 'No config bridge configured (run via `modelhitch bridge`).', type: 'not_implemented', code: 'not_implemented' } });
+        return;
+      }
+      const body = await this.readBody(req);
+      const result = await this.options.configBridge.updateConfig(body);
+      if (!result.ok) {
+        this.sendJson(res, 400, { error: { message: (result.errors ?? ['invalid config']).join('\n'), type: 'invalid_request_error', code: 'invalid_config' } });
+        return;
+      }
+      this.sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (method === 'GET' && path === '/v1/lane-health') {
+      this.log(`${method} ${path} ->`);
+      const health: LaneHealth[] = [];
+      const cd = this.cooldown;
+      if (cd instanceof CircuitBreaker) health.push(...cd.snapshot());
+      this.sendJson(res, 200, health);
+      return;
+    }
+
+    if (method === 'GET' && path === '/v1/catalog') {
+      this.log(`${method} ${path} ->`);
+      const providers: Array<{ id: string; name?: string; env?: string[]; modelCount?: number; minCost?: number; callable: boolean }> = [];
+      const builtin: string[] = [];
+      if (this.catalogSource) {
+        for (const id of this.catalogSource.catalogIds().sort()) {
+          const meta = this.catalogSource.metadata(id);
+          if (!meta) continue;
+          const callable = this.catalogSource.lookup(id) !== undefined;
+          const priced = meta.models.filter((m) => m.inputCostPer1M !== undefined).map((m) => m.inputCostPer1M as number);
+          providers.push({
+            id: meta.id,
+            name: meta.name,
+            env: meta.env.length ? meta.env : undefined,
+            modelCount: meta.models.length || undefined,
+            minCost: priced.length ? Math.min(...priced) : undefined,
+            callable,
+          });
+          if (callable && this.catalogSource.usability(id) === 'registry') builtin.push(meta.id);
+        }
+      } else {
+        for (const p of this.providers) builtin.push(p.id);
+      }
+      this.sendJson(res, 200, { providers, builtin });
+      return;
+    }
+
     // Gemini CLI / Google-native clients. Gemini CLI sends model ids in the
     // *path* (`/v1beta/models/{model}:generateContent`), so the capture is
     // `[^:]+` — `provider/model` prefixes survive for explicit routing.
@@ -388,21 +571,15 @@ export class OpenAICompatibleServer {
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
     const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
     const usageInfo = { providerId: provider.id, model, wire: 'chat-completions' as const, streamed: true };
-    const opts = this.options.autoMode;
     const stream = this.trackStream(
       withFailoverStream(
         targets,
         (lane) =>
           lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
-        {
-          codes: retryableCodesFor(opts),
-          maxAttempts: maxAttemptsFor(opts, Math.max(targets.length - 1, 0)),
-          onFailover: (event) => {
-            usageInfo.providerId = event.to.providerId;
-            usageInfo.model = event.to.model;
-            this.emitFailover(event);
-          },
-        },
+        this.failoverContext(this.streamCodes(), targets, (target) => {
+          usageInfo.providerId = target.providerId;
+          usageInfo.model = target.model;
+        }),
       ),
       usageInfo,
       startedAt,
@@ -588,21 +765,15 @@ export class OpenAICompatibleServer {
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
     const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
     const usageInfo = { providerId: provider.id, model, wire: 'responses' as const, streamed: true };
-    const opts = this.options.autoMode;
     const stream = this.trackStream(
       withFailoverStream(
         targets,
         (lane) =>
           lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
-        {
-          codes: retryableCodesFor(opts),
-          maxAttempts: maxAttemptsFor(opts, Math.max(targets.length - 1, 0)),
-          onFailover: (event) => {
-            usageInfo.providerId = event.to.providerId;
-            usageInfo.model = event.to.model;
-            this.emitFailover(event);
-          },
-        },
+        this.failoverContext(this.streamCodes(), targets, (target) => {
+          usageInfo.providerId = target.providerId;
+          usageInfo.model = target.model;
+        }),
       ),
       usageInfo,
       Date.now(),
@@ -706,21 +877,15 @@ export class OpenAICompatibleServer {
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
     const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
     const usageInfo = { providerId: provider.id, model, wire: 'messages' as const, streamed: true };
-    const opts = this.options.autoMode;
     const stream = this.trackStream(
       withFailoverStream(
         targets,
         (lane) =>
           lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
-        {
-          codes: retryableCodesFor(opts),
-          maxAttempts: maxAttemptsFor(opts, Math.max(targets.length - 1, 0)),
-          onFailover: (event) => {
-            usageInfo.providerId = event.to.providerId;
-            usageInfo.model = event.to.model;
-            this.emitFailover(event);
-          },
-        },
+        this.failoverContext(this.streamCodes(), targets, (target) => {
+          usageInfo.providerId = target.providerId;
+          usageInfo.model = target.model;
+        }),
       ),
       usageInfo,
       Date.now(),
@@ -839,21 +1004,15 @@ export class OpenAICompatibleServer {
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
     const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
     const usageInfo = { providerId: provider.id, model, wire: 'gemini' as const, streamed: true };
-    const opts = this.options.autoMode;
     const stream = this.trackStream(
       withFailoverStream(
         targets,
         (lane) =>
           lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
-        {
-          codes: retryableCodesFor(opts),
-          maxAttempts: maxAttemptsFor(opts, Math.max(targets.length - 1, 0)),
-          onFailover: (event) => {
-            usageInfo.providerId = event.to.providerId;
-            usageInfo.model = event.to.model;
-            this.emitFailover(event);
-          },
-        },
+        this.failoverContext(this.streamCodes(), targets, (target) => {
+          usageInfo.providerId = target.providerId;
+          usageInfo.model = target.model;
+        }),
       ),
       usageInfo,
       Date.now(),
@@ -964,11 +1123,13 @@ export class OpenAICompatibleServer {
     return credentials;
   }
 
-  /** Resolve auto-mode fallback lanes for a routed primary (provider/model). */
+  /** Resolve fallback lanes for a routed primary: policy lanes or auto-mode. */
   private async resolveLaneTargets(providerId: string, model: string): Promise<ResolvedLane[]> {
     const lanes: ResolvedLane[] = [];
-    for (const target of resolveLanes({ providerId, model }, this.options.autoMode)) {
-      const provider = this.providers.find((p) => p.id === target.providerId);
+    const fromSource = this.laneTargetsFromSource(providerId, model);
+    for (const target of fromSource) {
+      if (target.providerId === providerId && target.model === model) continue; // primary handled by caller
+      const provider = this.providerFor(target.providerId);
       if (!provider) continue;
       lanes.push({
         ...target,
@@ -979,21 +1140,57 @@ export class OpenAICompatibleServer {
     return lanes;
   }
 
-  /** Run a provider call with auto-mode failover; returns the result + lane used. */
+  private laneTargetsFromSource(providerId: string, model: string): FailoverTarget[] {
+    if (this.policy) return resolvePolicyLanes(this.policy, { providerId, model }, this.source);
+    return resolveLanes({ providerId, model }, this.options.autoMode);
+  }
+
+  private providerFor(id: string): Provider | undefined {
+    return this.catalogSource ? this.catalogSource.lookup(id) : this.providers.find((p) => p.id === id);
+  }
+
+  /** Run a provider call with policy/auto-mode failover; returns result + lane. */
   private withFailover<T>(
     targets: ResolvedLane[],
     call: (lane: ResolvedLane) => Promise<T>,
   ): Promise<{ value: T; target: ResolvedLane }> {
-    const opts = this.options.autoMode;
+    const codes = this.policy ? (this.policy.retryableCodes ?? DEFAULT_RETRYABLE_CODES) : retryableCodesFor(this.options.autoMode);
     return withFailover(
       targets,
       (lane) => call(lane),
-      {
-        codes: retryableCodesFor(opts),
-        maxAttempts: maxAttemptsFor(opts, Math.max(targets.length - 1, 0)),
-        onFailover: (event) => this.emitFailover(event),
-      },
+      this.failoverContext(codes, targets, () => undefined),
     );
+  }
+
+  /**
+   * Shared failover context for the streaming wires. `onLane` updates the
+   * per-request usage info to the lane that took over.
+   */
+  private failoverContext(
+    codes: readonly (import('../core/errors.js').ModelHitchErrorCode)[],
+    targets: ResolvedLane[],
+    onLaneChange: (target: FailoverTarget) => void,
+  ) {
+    return {
+      codes,
+      maxAttempts: this.policy ? targets.length : maxAttemptsFor(this.options.autoMode, Math.max(targets.length - 1, 0)),
+      onFailover: (event: FailoverEvent) => {
+        onLaneChange(event.to);
+        this.emitFailover(event);
+      },
+      cooldown: this.cooldown,
+      onSuccess: (target: FailoverTarget) => this.cooldown?.success?.(target),
+      delayMsBeforeFailover: this.policy
+        ? (from: FailoverTarget, err: unknown, attempt: number) => computeBackoffDelay(this.policy?.backoff, err, attempt)
+        : undefined,
+      onExhausted: this.options.onExhausted,
+    };
+  }
+
+  private streamCodes(): readonly (import('../core/errors.js').ModelHitchErrorCode)[] {
+    return this.policy
+      ? (this.policy.retryableCodes ?? DEFAULT_RETRYABLE_CODES)
+      : retryableCodesFor(this.options.autoMode);
   }
 
   private emitFailover(event: FailoverEvent): void {

@@ -8,7 +8,10 @@ export default defineConfig({
   clean: true,
   target: 'es2022',
   loader: { '.md': 'text' },
+  // mdev-sdk is ESM-only with no CJS entry — bundle it into dist so both the
+  // ESM and CJS builds (and the browser entry) keep working for consumers.
   // React stays a peer dependency of the `modelhitch/react` entry — never
   // bundle it.
   external: ['react', 'react/jsx-runtime'],
+  noExternal: ['mdev-sdk'],
 });
