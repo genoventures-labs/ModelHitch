@@ -101,6 +101,33 @@ describe('ExhaustedError (Milestone 4 — explicit exhaustion diagnostics)', () 
     expect(err.code).toBe('missing-api-key');
   });
 
+  it('keeps the first credential error when later lanes are only skipped on cooldown', async () => {
+    // Regression: credential skips used to leave firstError unset, so exhaustion
+    // fell back to "All failover lanes failed." after cooled remainder lanes.
+    const cd = {
+      state: new Map<string, number>([['b/m2', 60_000]]),
+      cooldownMs(t: { providerId: string; model: string }) {
+        return this.state.get(`${t.providerId}/${t.model}`) ?? 0;
+      },
+      cool() {},
+    };
+    const err = exhausted(
+      await capture(() =>
+        withFailover(
+          [lane('a', 'm1'), lane('b', 'm2')],
+          async (t) => {
+            if (t.providerId === 'a') throw new ModelHitchError('invalid-api-key', 'bad zen key', { status: 401 });
+            throw new Error('should not attempt cooled lane');
+          },
+          { cooldown: cd },
+        ),
+      ),
+    );
+    expect(err.code).toBe('invalid-api-key');
+    expect(err.message).toContain('bad zen key');
+    expect(err.lanes).toHaveLength(1);
+  });
+
   it('preserves the message of a plain (non-ModelHitchError) first error', () => {
   // Plain Errors are non-retryable so the kernel propagates them directly;
   // the fallback message handling is defensive — pin it via direct construction.

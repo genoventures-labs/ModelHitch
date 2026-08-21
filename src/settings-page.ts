@@ -281,11 +281,21 @@ function uniqueProviders() {
   var allowed = (cfg.catalog && cfg.catalog.providers) || [];
   allowed.forEach(function (id) { if (out.indexOf(id) === -1) out.push(id); });
   if (cfg.defaultProviderId && out.indexOf(cfg.defaultProviderId) === -1) out.push(cfg.defaultProviderId);
+  // Always offer key rows for every provider the bridge can actually call.
+  (state.catalog || []).forEach(function (p) {
+    if (p && p.id && p.callable !== false && out.indexOf(p.id) === -1) out.push(p.id);
+  });
+  (state.builtin || []).forEach(function (id) {
+    if (id && out.indexOf(id) === -1) out.push(id);
+  });
   return out;
 }
 
 function chosenCatalogIds() {
-  return ((state.config && state.config.catalog && state.config.catalog.providers) || []);
+  var configured = ((state.config && state.config.catalog && state.config.catalog.providers) || []);
+  if (configured.length) return configured;
+  // Registry-only / no allowlist yet: treat every callable catalog entry as on.
+  return (state.catalog || []).filter(function (p) { return p && p.callable !== false; }).map(function (p) { return p.id; });
 }
 
 function renderProviders() {
@@ -295,9 +305,13 @@ function renderProviders() {
   list.innerHTML = '';
   var hits = state.catalog.filter(function (p) {
     if (!q) return true;
-    return (p.id + ' ' + p.name).toLowerCase().indexOf(q) !== -1;
+    return (p.id + ' ' + (p.name || '')).toLowerCase().indexOf(q) !== -1;
   });
-  if (!hits.length) { list.innerHTML = '<div class="empty">no providers match</div>'; }
+  if (!hits.length) {
+    list.innerHTML = state.catalog.length
+      ? '<div class="empty">no providers match</div>'
+      : '<div class="empty">no providers available from the bridge</div>';
+  }
   hits.forEach(function (p) {
     var row = document.createElement('label');
     row.className = 'provider-row';
@@ -437,9 +451,11 @@ function assemble() {
 async function loadAll() {
   try {
     state.config = await api('/v1/config');
-    state.catalog = (await api('/v1/catalog')).providers || [];
-    state.builtin = (await api('/v1/catalog')).builtin || [];
+    var cat = await api('/v1/catalog');
+    state.catalog = cat.providers || [];
+    state.builtin = cat.builtin || [];
     renderKeys(); renderProviders(); renderPolicy(); renderReliability();
+    refreshHealth();
   } catch (err) {
     showErrors(['Failed to load settings: ' + err.message]);
   }

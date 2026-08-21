@@ -18,7 +18,9 @@
  *   MODELHITCH_MAX_BODY_BYTES  max request body for the bridge (default 64 MiB)
  *   MODELHITCH_HOME       directory for the background pid/log (default ~/.modelhitch)
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { printAsciiLogo } from './ascii.js';
 import { createModelHitchServer } from './server/server.js';
 import { OPENCODE_GO_MODELS, OPENCODE_ZEN_MODELS } from './providers/opencode.js';
@@ -49,6 +51,7 @@ import {
   defaultConfigPath,
   defaultConfigTemplate,
   initConfigFile,
+  modelhitchHome,
   readConfigFile,
   writeConfigFile,
 } from './config-file.js';
@@ -58,6 +61,71 @@ import { CircuitBreaker } from './core/circuit-breaker.js';
 import type { LaneCooldown } from './core/failover.js';
 import type { Provider } from './providers/types.js';
 import { defaultProviders } from './registry.js';
+
+/** Provider id → env vars checked (first hit wins) when seeding config.keys. */
+const PROVIDER_KEY_ENV: Record<string, string[]> = {
+  'opencode-zen': ['OPENCODE_ZEN_API_KEY', 'OPENCODE_API_KEY'],
+  'opencode-go': ['OPENCODE_GO_API_KEY', 'OPENCODE_API_KEY'],
+  openai: ['OPENAI_API_KEY'],
+  anthropic: ['ANTHROPIC_API_KEY'],
+  groq: ['GROQ_API_KEY'],
+  openrouter: ['OPENROUTER_API_KEY'],
+  together: ['TOGETHER_API_KEY'],
+  huggingface: ['HF_TOKEN'],
+  gemini: ['GEMINI_API_KEY'],
+  deepseek: ['DEEPSEEK_API_KEY'],
+  xai: ['XAI_API_KEY'],
+  mistral: ['MISTRAL_API_KEY'],
+  moonshot: ['MOONSHOT_API_KEY'],
+  zai: ['ZAI_API_KEY'],
+};
+
+/**
+ * Load KEY=VALUE pairs from a dotenv-style file into process.env without
+ * overwriting anything already set. Best-effort — missing files are ignored.
+ */
+function loadEnvFile(path: string): void {
+  if (!existsSync(path)) return;
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return;
+  }
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (process.env[key] !== undefined) continue;
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] = value;
+  }
+}
+
+/** Pull known provider keys from the process env into a config.keys map. */
+function keysFromEnv(existing: Record<string, string> = {}): Record<string, string> {
+  const keys = { ...existing };
+  for (const [providerId, envNames] of Object.entries(PROVIDER_KEY_ENV)) {
+    if (keys[providerId]) continue;
+    for (const name of envNames) {
+      const value = process.env[name];
+      if (value) {
+        keys[providerId] = value;
+        break;
+      }
+    }
+  }
+  return keys;
+}
 
 const VERSION = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -112,6 +180,12 @@ Bridge environment:
 }
 
 async function runBridge(): Promise<void> {
+  // Background daemons often start without a shell env. Load local dotenv files
+  // (cwd + ~/.modelhitch) so OPENCODE_*/OPENAI_* keys still resolve.
+  loadEnvFile(join(process.cwd(), '.env'));
+  loadEnvFile(join(modelhitchHome(), '.env'));
+  loadEnvFile(join(homedir(), '.modelhitch', '.env'));
+
   const port = Number(process.env.MODELHITCH_PORT ?? 3939);
   const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
   const maxBodyBytes = Number(process.env.MODELHITCH_MAX_BODY_BYTES ?? 64 * 1024 * 1024);
@@ -127,6 +201,16 @@ async function runBridge(): Promise<void> {
     }
   }
   const config: ModelHitchConfig = loaded ?? defaultConfigTemplate();
+  // Merge env-sourced keys so a bridge without a written keys block still works
+  // (and the settings UI can show which providers already have credentials).
+  config.keys = keysFromEnv(config.keys ?? {});
+  if (!loaded) {
+    try {
+      writeConfigFile(configPath, config);
+    } catch {
+      /* settings still work in-memory; file write is best-effort */
+    }
+  }
 
   // Catalog mode: warm the models.dev source, build the executable provider set.
   let catalogSource: CatalogSource | undefined;
@@ -160,7 +244,7 @@ async function runBridge(): Promise<void> {
     cooldown,
     catalogSource,
     keystore,
-    // Keys from the config file are available from the very first request —
+    // Keys from the config file / env are available from the very first request —
     // no Apply needed for keys already stored locally.
     apiKeys: config.keys,
     usagePersistence: true,

@@ -197,9 +197,13 @@ describe('settings bridge endpoints', () => {
   it('GET /v1/catalog lists built-in providers without a catalog source', async () => {
     const res = await fetch(`${base}/v1/catalog`);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { providers: unknown[]; builtin: string[] };
+    const body = (await res.json()) as {
+      providers: Array<{ id: string; name?: string; callable?: boolean }>;
+      builtin: string[];
+    };
     expect(body.builtin).toContain('mock');
-    expect(body.providers).toEqual([]);
+    // Registry-only mode still populates providers so the settings UI is usable.
+    expect(body.providers.some((p) => p.id === 'mock' && p.callable === true)).toBe(true);
   });
 
   it('config keys are wired as apiKeys at server startup (no Apply needed, F2)', async () => {

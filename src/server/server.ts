@@ -467,7 +467,18 @@ export class OpenAICompatibleServer {
           if (callable && this.catalogSource.usability(id) === 'registry') builtin.push(meta.id);
         }
       } else {
-        for (const p of this.providers) builtin.push(p.id);
+        // Registry-only mode: still populate `providers` so the settings UI has
+        // a picker (and key rows) without requiring models.dev catalog mode.
+        for (const p of this.providers) {
+          builtin.push(p.id);
+          const env = providerEnvHints(p.id);
+          providers.push({
+            id: p.id,
+            name: p.name,
+            env: env.length ? env : undefined,
+            callable: true,
+          });
+        }
       }
       this.sendJson(res, 200, { providers, builtin });
       return;
@@ -1319,6 +1330,27 @@ export class OpenAICompatibleServer {
       self.reportUsage(info, usage, startedAt);
     })();
   }
+}
+
+/** Env var hints for the settings UI when models.dev catalog mode is off. */
+function providerEnvHints(providerId: string): string[] {
+  const map: Record<string, string[]> = {
+    'opencode-zen': ['OPENCODE_ZEN_API_KEY', 'OPENCODE_API_KEY'],
+    'opencode-go': ['OPENCODE_GO_API_KEY', 'OPENCODE_API_KEY'],
+    openai: ['OPENAI_API_KEY'],
+    anthropic: ['ANTHROPIC_API_KEY'],
+    groq: ['GROQ_API_KEY'],
+    openrouter: ['OPENROUTER_API_KEY'],
+    together: ['TOGETHER_API_KEY'],
+    huggingface: ['HF_TOKEN'],
+    gemini: ['GEMINI_API_KEY'],
+    deepseek: ['DEEPSEEK_API_KEY'],
+    xai: ['XAI_API_KEY'],
+    mistral: ['MISTRAL_API_KEY'],
+    moonshot: ['MOONSHOT_API_KEY'],
+    zai: ['ZAI_API_KEY'],
+  };
+  return map[providerId] ?? [];
 }
 
 /** Create a bridge server with the given options. */

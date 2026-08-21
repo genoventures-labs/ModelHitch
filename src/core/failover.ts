@@ -298,16 +298,15 @@ export async function withFailover<T, L extends FailoverTarget>(
       return { value, target };
     } catch (err) {
       attempts.push({ target, error: errorInfo(err) });
+      // Always remember the first real failure — including credential misses —
+      // so an exhausted walk never surfaces the empty "All failover lanes
+      // failed." fallback when later lanes were only skipped on cooldown.
+      firstError ??= err;
       const last = i >= targets.length - 1 || i >= maxAttempts - 1;
       if (last) {
-        // Preserve the documented contract: on an exhausted walk, surface the
-        // FIRST error — the lane the user actually configured — even if the
-        // final lane failed with a non-retryable error. Also honor cooling
-        // for a final retryable failure (e.g. 429 with Retry-After) so the
-        // NEXT request doesn't immediately re-walk a lane its provider told
-        // us to leave alone (the "bottomed out" state is then reported via
-        // onExhausted/ExhaustedError rather than silently re-hammered).
-        firstError ??= err;
+        // Also honor cooling for a final retryable failure (e.g. 429 with
+        // Retry-After) so the NEXT request doesn't immediately re-walk a lane
+        // its provider told us to leave alone.
         if (isRetryableError(err, codes)) {
           ctx.cooldown?.cool(target, errorInfo(err));
         }
@@ -318,7 +317,6 @@ export async function withFailover<T, L extends FailoverTarget>(
         continue; // no key for this lane — silently try the next
       }
       if (!isRetryableError(err, codes)) throw err;
-      firstError ??= err;
       ctx.cooldown?.cool(target, errorInfo(err));
       const waitMs = ctx.delayMsBeforeFailover?.(target, err, i + 1);
       await sleep(waitMs ?? 0);
@@ -376,6 +374,10 @@ export function withFailoverStream<T, L extends FailoverTarget>(
         return; // clean completion
       } catch (err) {
         attempts.push({ target, error: errorInfo(err) });
+        // Always remember the first real failure — including credential misses —
+        // so an exhausted walk never loses the actionable cause when later
+        // lanes are only skipped on cooldown.
+        firstError ??= err;
         const last = i >= targets.length - 1 || i >= maxAttempts - 1;
         if (last) {
           if (yielded) {
@@ -387,12 +389,6 @@ export function withFailoverStream<T, L extends FailoverTarget>(
             }
             throw err;
           }
-          // Preserve the documented contract: on an exhausted walk surface the
-          // FIRST error — the lane the user actually configured — even if the
-          // final lane failed with a non-retryable error. Also honor cooling
-          // for a final retryable failure (e.g. 429 with Retry-After) so the
-          // NEXT request doesn't immediately re-walk a lane on cooldown.
-          firstError ??= err;
           if (isRetryableError(err, codes)) {
             ctx.cooldown?.cool(target, errorInfo(err));
           }
@@ -409,7 +405,6 @@ export function withFailoverStream<T, L extends FailoverTarget>(
           ctx.cooldown?.cool(target, errorInfo(err));
           throw err;
         }
-        firstError ??= err;
         ctx.cooldown?.cool(target, errorInfo(err));
         const waitMs = ctx.delayMsBeforeFailover?.(target, err, i + 1);
         await sleep(waitMs ?? 0);
