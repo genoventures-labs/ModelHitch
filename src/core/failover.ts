@@ -199,11 +199,14 @@ export class ExhaustedError extends ModelHitchError {
     fallbackMessage = 'All failover lanes failed.',
   ) {
     const first = firstError instanceof ModelHitchError ? firstError : undefined;
-    // Preserve the message of ANY first error (plain Errors included), not
-    // just ModelHitchErrors — pre-M4 the final-lane error was rethrown as-is.
-    const message =
+    // Preserve the first error's code/status/Retry-After (the lane the user
+    // actually configured). Enrich the message when multiple lanes were tried
+    // so clients can see that rotation ran — not that a single provider alone
+    // failed in isolation.
+    const baseMessage =
       first?.message ??
       (firstError instanceof Error ? firstError.message : fallbackMessage);
+    const message = enrichExhaustionMessage(baseMessage, info, fallbackMessage);
     super(first?.code ?? 'provider-error', message, {
       status: first?.status,
       providerId: first?.providerId,
@@ -219,6 +222,19 @@ export class ExhaustedError extends ModelHitchError {
 /** Narrow a caught error to an exhausted walk (`ExhaustedError`). */
 export function isExhaustedError(err: unknown): err is ExhaustedError {
   return err instanceof ExhaustedError;
+}
+
+/** Append a short rotation summary when more than one lane was attempted. */
+function enrichExhaustionMessage(
+  baseMessage: string,
+  info: ExhaustionInfo,
+  fallbackMessage: string,
+): string {
+  if (info.attempts.length <= 1) return baseMessage || fallbackMessage;
+  const trail = info.attempts
+    .map((a) => `${a.target.providerId}/${a.target.model} (${a.error.code})`)
+    .join(' → ');
+  return `${baseMessage} [rotated ${info.attempts.length} lanes: ${trail}]`;
 }
 
 export interface FailoverContext {

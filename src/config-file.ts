@@ -52,15 +52,23 @@ export function writeConfigFile(path: string, config: ModelHitchConfig): void {
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 
-/** The default template written by `modelhitch config init`. */
+/**
+ * Default template written by `modelhitch config init` and used when the bridge
+ * starts with no config file. Mirrors `DEFAULT_FAILOVER_LANES`: paid Zen first,
+ * cheap Go next, free Zen models as the safety net. No `maxProviders` cap —
+ * a hard provider cap trims free/cross-provider lanes when the request primary
+ * is a third provider (e.g. openai), which silently kills rotation.
+ */
 export function defaultConfigTemplate(): ModelHitchConfig {
   return {
     version: CONFIG_VERSION,
     defaultProviderId: 'opencode-zen',
     policy: {
       trusted: [{ providerId: 'opencode-zen', models: ['big-pickle'] }],
-      fallback: [{ providerId: 'opencode-go', models: ['deepseek-v4-flash'] }],
-      maxProviders: 2,
+      fallback: [
+        { providerId: 'opencode-go', models: ['deepseek-v4-flash'] },
+        { providerId: 'opencode-zen', models: ['deepseek-v4-flash-free', 'mimo-v2.5-free'] },
+      ],
     },
     cooldown: { type: 'circuit-breaker', failureThreshold: 3, baseTripMs: 15_000, maxTripMs: 120_000 },
   };

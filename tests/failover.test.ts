@@ -176,7 +176,7 @@ describe('withFailover (non-stream)', () => {
           throw new ModelHitchError('provider-error', '502 second');
         },
       ),
-    ).rejects.toMatchObject({ message: '429 first', status: undefined });
+    ).rejects.toMatchObject({ message: expect.stringContaining('429 first'), status: undefined });
   });
 
   it('propagates non-retryable errors without trying fallbacks', async () => {

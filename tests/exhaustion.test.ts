@@ -41,9 +41,11 @@ describe('ExhaustedError (Milestone 4 — explicit exhaustion diagnostics)', () 
         ),
       ),
     );
-    // Contract: the surfaced error looks like the FIRST error.
+    // Contract: code/status stay the FIRST error; message keeps that text and
+    // adds a short rotation trail so clients can see failover ran.
     expect(err.code).toBe('rate-limited');
-    expect(err.message).toBe('429 first');
+    expect(err.message).toContain('429 first');
+    expect(err.message).toMatch(/rotated 2 lanes/);
     expect(err.status).toBe(429);
     // Diagnostics: full walk + per-lane attempts.
     expect(err.info.targets).toEqual([lane('a', 'm1'), lane('b', 'm2')]);

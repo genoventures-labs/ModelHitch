@@ -47,6 +47,7 @@ import {
 } from './config.js';
 import {
   defaultConfigPath,
+  defaultConfigTemplate,
   initConfigFile,
   readConfigFile,
   writeConfigFile,
@@ -125,8 +126,7 @@ async function runBridge(): Promise<void> {
       return;
     }
   }
-  const config: ModelHitchConfig =
-    loaded ?? { version: 1, defaultProviderId: 'opencode-zen', policy: { trusted: [{ providerId: 'opencode-zen', models: ['big-pickle'] }], fallback: [{ providerId: 'opencode-go', models: ['deepseek-v4-flash'] }] } };
+  const config: ModelHitchConfig = loaded ?? defaultConfigTemplate();
 
   // Catalog mode: warm the models.dev source, build the executable provider set.
   let catalogSource: CatalogSource | undefined;

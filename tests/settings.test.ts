@@ -4,9 +4,12 @@ import {
   CircuitBreaker,
   MemoryLaneCooldown,
   createModelHitchServer,
+  createRegistrySource,
   defaultConfigTemplate,
+  defaultProviders,
   isMaskedSecret,
   maskSecret,
+  resolvePolicyLanes,
   serializeConfig,
   validateConfig,
   buildCatalogOptions,
@@ -82,9 +85,31 @@ describe('config validity + serialization', () => {
       const read = readConfigFile(path);
       expect(read?.version).toBe(CONFIG_VERSION);
       expect(validateConfig(defaultConfigTemplate()).errors).toEqual([]);
+      // Free-model safety net must be present; a hard maxProviders cap would
+      // trim cross-provider rotation when the request primary is a third id.
+      const tpl = defaultConfigTemplate();
+      expect(tpl.policy?.maxProviders).toBeUndefined();
+      const fallbackModels = (tpl.policy?.fallback ?? []).flatMap((e) => e.models ?? []);
+      expect(fallbackModels).toContain('deepseek-v4-flash-free');
+      expect(fallbackModels).toContain('mimo-v2.5-free');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('default policy keeps free lanes when the request primary is a third provider', () => {
+    // Regression: maxProviders: 2 + openai primary used to drop the free-model
+    // safety net, so a 429 on openai/opencode-go exhausted without rotation.
+    const policy = defaultConfigTemplate().policy!;
+    const source = createRegistrySource(defaultProviders);
+    const targets = resolvePolicyLanes(policy, { providerId: 'openai', model: 'gpt-4o-mini' }, source);
+    expect(targets.map((t) => `${t.providerId}/${t.model}`)).toEqual([
+      'openai/gpt-4o-mini',
+      'opencode-zen/big-pickle',
+      'opencode-go/deepseek-v4-flash',
+      'opencode-zen/deepseek-v4-flash-free',
+      'opencode-zen/mimo-v2.5-free',
+    ]);
   });
 
   it('readConfigFile returns null when missing and throws on invalid JSON', () => {

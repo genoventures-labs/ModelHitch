@@ -300,7 +300,7 @@ describe('withFailover cooldown + delay + exhaustion sockets', () => {
         },
         { onExhausted: (info) => exhausted.push(info) },
       ),
-    ).rejects.toMatchObject({ message: '429 first' });
+    ).rejects.toMatchObject({ message: expect.stringContaining('429 first') });
     expect(exhausted).toHaveLength(1);
     expect(exhausted[0].targets).toEqual([lane('a', 'm1'), lane('b', 'm2')]);
     expect(exhausted[0].attempts.map((a: { target: FailoverTarget; error: { code: string } }) => a.target)).toEqual([
@@ -343,7 +343,7 @@ describe('withFailover cooldown + delay + exhaustion sockets', () => {
           throw new ModelHitchError('missing-api-key', 'no key for b');
         },
       ),
-    ).rejects.toMatchObject({ message: '429 first' });
+    ).rejects.toMatchObject({ message: expect.stringContaining('429 first') });
   });
 
   it('surfaces the FIRST error when the final lane fails non-retryably (contract preservation)', async () => {
@@ -357,7 +357,7 @@ describe('withFailover cooldown + delay + exhaustion sockets', () => {
           throw new ModelHitchError('bad-request', '400 last', { status: 400 });
         },
       ),
-    ).rejects.toMatchObject({ message: '429 first' });
+    ).rejects.toMatchObject({ message: expect.stringContaining('429 first') });
   });
 
   it('cools the FINAL lane too when it fails retryably (no immediate re-walk)', async () => {
@@ -462,7 +462,7 @@ describe('ModelHitch policy wiring', () => {
     });
     await expect(mh.chat({ messages: [{ role: 'user', content: 'hi' }] })).rejects.toMatchObject({
       code: 'rate-limited',
-      message: '429',
+      message: expect.stringContaining('429'),
     });
     expect(exhausted).toHaveLength(1);
     expect(exhausted[0].attempts).toHaveLength(2);
