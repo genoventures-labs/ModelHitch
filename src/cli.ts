@@ -278,7 +278,12 @@ async function runBridge(): Promise<void> {
         } catch (err) {
           return { ok: false, errors: [`Failed to write ${configPath}: ${(err as Error).message}`] };
         }
-        // Apply immediately — hot reload.
+        // Apply immediately — hot reload. Optional fields absent from the
+        // incoming document must be cleared first: Object.assign alone would
+        // keep stale values (e.g. a catalog block the UI just unchecked).
+        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'cooldown'] as const) {
+          delete (config as unknown as Record<string, unknown>)[k];
+        }
         Object.assign(config, asConfig);
         try {
           const nextCatalog = buildCatalogOptions(config);
@@ -292,6 +297,18 @@ async function runBridge(): Promise<void> {
               policy: policyFromConfig(config),
               cooldown: buildCooldownFromConfig(config) ?? (catalogSource ? new CircuitBreaker() : undefined),
               catalogSource: src,
+              apiKeys: config.keys,
+              defaultProviderId: config.defaultProviderId,
+              defaultModel: config.defaultModel,
+            });
+          } else if (!wantsCatalog && catalogSource) {
+            // Catalog mode switched off — fall back to the built-in registry.
+            catalogSource = undefined;
+            server.reconfigure({
+              providers,
+              policy: policyFromConfig(config),
+              cooldown: buildCooldownFromConfig(config),
+              catalogSource: undefined,
               apiKeys: config.keys,
               defaultProviderId: config.defaultProviderId,
               defaultModel: config.defaultModel,

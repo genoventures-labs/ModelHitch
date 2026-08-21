@@ -21,6 +21,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readConfigFile, writeConfigFile } from '../src/config-file.js';
+import { settingsPageHtml } from '../src/settings-page.js';
 
 // ---- pure config helpers ---------------------------------------------------
 
@@ -177,6 +178,21 @@ describe('settings bridge endpoints', () => {
     const html = await res.text();
     expect(html).toContain('model');
     expect(html).toContain('Lane health');
+  });
+
+  it("serves an inline script that actually parses (template escape-rot guard)", () => {
+    // Regression: the page is one big template literal. A bare `\n` or `<\/x>`
+    // inside it gets consumed at build time, injecting a literal newline /
+    // broken regex into the served JS — which kills the whole script (dead
+    // key inputs, dead search, no config rendering) while the static HTML
+    // still looks fine.
+    const html = settingsPageHtml();
+    const match = html.match(/<script>([\s\S]*?)<\/script>/);
+    expect(match).toBeTruthy();
+    expect(() => new Function(match![1]!)).not.toThrow();
+    // The two known escape sites must reach the browser verbatim.
+    expect(html).toContain("errs.join('\\n')");
+    expect(html).toContain('<\\/select>');
   });
 
   it('GET /v1/config returns the masked document', async () => {

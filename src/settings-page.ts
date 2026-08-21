@@ -7,7 +7,7 @@
  *
  *   GET  /v1/config        masked config document
  *   PUT  /v1/config        validate + apply (writes the config file)
- *   GET  /v1/catalog       provider inventory for the picker
+ *   GET  /v1/catalog       provider inventory (registry or models.dev)
  *   GET  /v1/lane-health   circuit-breaker health snapshot (polled)
  *   GET  /v1/usage         usage summary (linked)
  *
@@ -17,7 +17,10 @@
  */
 
 export function settingsPageHtml(): string {
-  return `<!doctype html>
+  // String.raw: the inline browser JS below contains regex/string escapes
+  // (`\n`, `<\/select>`) that must reach the browser verbatim — a plain
+  // template literal would consume them at build time and kill the script.
+  return String.raw`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -52,7 +55,6 @@ export function settingsPageHtml(): string {
   .section-head h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); margin: 0; font-weight: 600; }
   .section-head .hint { font-size: 12px; color: var(--muted); }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; }
-  .panel + .panel { margin-top: 10px; }
 
   .row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   .row:last-child { border-bottom: 0; }
@@ -76,8 +78,6 @@ export function settingsPageHtml(): string {
   .btn:disabled { opacity: 0.45; cursor: default; }
 
   .pill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--line2); border-radius: 4px; padding: 3px 8px; background: var(--panel2); }
-  .pill .x { cursor: pointer; color: var(--muted); }
-  .pill .x:hover { color: var(--bad); }
 
   .lane-list .lane { display: grid; grid-template-columns: 1fr 2fr auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .lane-list .lane:last-child { border-bottom: 0; }
@@ -88,12 +88,25 @@ export function settingsPageHtml(): string {
   .dot.open { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
   .dot.half-open { background: var(--warn); }
   .dot.closed { background: var(--ok); }
+  .dot.key-set { background: var(--ok); }
+  .dot.key-missing { background: var(--muted); opacity: 0.55; }
 
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line2); font-weight: 600; }
   td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
   tr:last-child td { border-bottom: 0; }
   td.mono, th.mono { font-family: var(--mono); font-size: 12px; }
+
+  /* Provider cards: the one place a provider gets configured. */
+  .prov { padding: 10px 2px; border-bottom: 1px solid var(--line); }
+  .prov:last-child { border-bottom: 0; }
+  .prov-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .prov-head .id { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+  .prov-head .name { font-size: 12px; color: var(--muted); }
+  .badge { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; border: 1px solid var(--accent-dim); color: var(--accent); border-radius: 3px; padding: 1px 6px; }
+  .prov-key { display: flex; align-items: center; gap: 10px; margin-top: 7px; }
+  .prov-key input { flex: 1; min-width: 200px; }
+  .prov-key .env { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
 
   .search { margin-bottom: 10px; }
   .provider-row { display: flex; align-items: center; gap: 10px; padding: 6px 4px; border-bottom: 1px solid var(--line); cursor: pointer; }
@@ -111,6 +124,7 @@ export function settingsPageHtml(): string {
   .empty { color: var(--muted); font-style: italic; padding: 8px 2px; }
   details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
   details { margin-top: 8px; }
+  .warnbox { border: 1px solid var(--warn); background: #241d10; color: #e3c98f; border-radius: 4px; padding: 8px 12px; font-size: 12px; margin-bottom: 10px; }
 </style>
 </head>
 <body>
@@ -128,23 +142,8 @@ export function settingsPageHtml(): string {
   <div id="saved">Applied.</div>
 
   <section>
-    <div class="section-head"><h2>API keys</h2><span class="hint">stored in the local config file, masked everywhere else — no env digging</span></div>
-    <div class="panel">
-      <div id="keys"></div>
-      <div id="keys-empty" class="empty">No providers configured yet — pick some below, then add keys here.</div>
-    </div>
-  </section>
-
-  <section>
-    <div class="section-head"><h2>Providers</h2><span class="hint">from the models.dev catalog — the universe your lanes can use</span></div>
-    <div class="panel">
-      <input id="provider-search" type="text" placeholder="search providers…" class="search" />
-      <div id="provider-list"></div>
-    </div>
-    <details>
-      <summary>built-in providers (always available)</summary>
-      <div id="builtin-list" class="panel" style="margin-top:6px"></div>
-    </details>
+    <div class="section-head"><h2>Providers</h2><span class="hint">paste an API key to enable a provider — stored locally in ~/.modelhitch/config.json, masked everywhere else</span></div>
+    <div class="panel" id="providers"></div>
   </section>
 
   <section>
@@ -163,7 +162,7 @@ export function settingsPageHtml(): string {
         <div class="num-row"><label>cap ms</label><input id="backoffMax" type="number" min="0" placeholder="none" /></div>
       </div>
       <div class="row" style="border-bottom:0">
-        <div class="num-row"><label>default provider</label><input id="defaultProviderId" type="text" placeholder="opencode-zen" /></div>
+        <div class="num-row"><label>default provider</label><select id="defaultProviderId"></select></div>
         <div class="num-row"><label>default model</label><input id="defaultModel" type="text" placeholder="(provider default)" /></div>
       </div>
     </div>
@@ -198,6 +197,15 @@ export function settingsPageHtml(): string {
       </table>
     </div>
   </section>
+
+  <details>
+    <summary>advanced — models.dev catalog mode</summary>
+    <div class="warnbox">The bridge normally serves its built-in registry (the providers above). Checking boxes here switches provider resolution to the live models.dev catalog on Apply — different inventory, different defaults. Leave everything unchecked to stay on the built-in registry.</div>
+    <div class="panel">
+      <input id="provider-search" type="text" placeholder="search catalog providers…" class="search" />
+      <div id="provider-list"></div>
+    </div>
+  </details>
 </main>
 
 <div class="applybar"><div class="inner">
@@ -208,7 +216,7 @@ export function settingsPageHtml(): string {
 
 <script>
 "use strict";
-var state = { config: null, catalog: [] };
+var state = { config: null, catalog: [], builtin: [] };
 
 function el(id) { return document.getElementById(id); }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, function (c) { return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]; }); }
@@ -230,33 +238,76 @@ function flashSaved() {
   var s = el('saved'); s.style.display = 'inline'; setTimeout(function () { s.style.display = 'none'; }, 2200);
 }
 
-// ---- keys ----------------------------------------------------------------
+// ---- providers -----------------------------------------------------------
 
-function renderKeys() {
+function callableProviders() {
+  return (state.catalog || []).filter(function (p) { return p && p.callable !== false; });
+}
+
+/* Provider ids the policy can reference: everything callable, sorted, with
+   already-configured ones first so the important rows are on top. */
+function knownProviderIds() {
+  var cfg = state.config || {};
+  var used = {};
+  (cfg.policy ? cfg.policy.trusted.concat(cfg.policy.fallback) : []).forEach(function (l) {
+    if (l && l.providerId) used[l.providerId] = true;
+  });
+  if (cfg.defaultProviderId) used[cfg.defaultProviderId] = true;
+  if (cfg.keys) Object.keys(cfg.keys).forEach(function (k) { used[k] = true; });
+  return callableProviders()
+    .map(function (p) { return p.id; })
+    .sort(function (a, b) {
+      var ua = used[a] ? 0 : 1, ub = used[b] ? 0 : 1;
+      return ua !== ub ? ua - ub : (a < b ? -1 : a > b ? 1 : 0);
+    });
+}
+
+function providerMeta(id) {
+  return (state.catalog || []).find(function (p) { return p.id === id; }) || { id: id };
+}
+
+function usageBadges(id) {
+  var cfg = state.config || {};
+  var pol = cfg.policy || { trusted: [], fallback: [] };
+  var bits = [];
+  if (pol.trusted.some(function (l) { return l.providerId === id; })) bits.push('trusted');
+  if (pol.fallback.some(function (l) { return l.providerId === id; })) bits.push('fallback');
+  if ((cfg.defaultProviderId || '') === id) bits.push('default');
+  return bits;
+}
+
+function renderProviders() {
   var cfg = state.config || {};
   var keys = cfg.keys || {};
-  var providers = uniqueProviders().sort();
-  var box = el('keys');
+  var box = el('providers');
   box.innerHTML = '';
-  el('keys-empty').style.display = providers.length ? 'none' : 'block';
-  providers.forEach(function (id) {
-    var known = catalogMeta(id);
-    var maskedValue = keys[id] || '';
-    var row = document.createElement('div');
-    row.className = 'row';
-    row.innerHTML = '<div class="grow"><label>' + esc(id) + (known && known.env && known.env[0] ? ' · ' + esc(known.env[0]) : '') + '</label>' +
-      // Truthful placeholder: a masked value means a real key is already set
-      // locally (the plan: send plaintext only when changed, keep it empty
-      // now so it never round-trips a masked blob back over the wire).
-      '<input type="password" class="key-input" data-provider="' + esc(id) + '" placeholder="' + (maskedValue ? '(set — masked locally, leave blank to keep)' : '(empty — resolved from env if set)') + '" value="" autocomplete="off" /></div>';
-    box.appendChild(row);
+  callableProviders().forEach(function (p) {
+    var id = p.id;
+    var hasKey = !!keys[id];
+    var badges = usageBadges(id);
+    var card = document.createElement('div');
+    card.className = 'prov';
+    var head = '<div class="prov-head">' +
+      '<span class="dot ' + (hasKey ? 'key-set' : 'key-missing') + '" title="' + (hasKey ? 'API key stored locally' : 'no API key yet') + '"></span>' +
+      '<span class="id">' + esc(id) + '</span>' +
+      '<span class="name">' + esc(p.name || '') + '</span>' +
+      badges.map(function (b) { return '<span class="badge">' + esc(b) + '</span>'; }).join('') +
+      '</div>';
+    var envHint = (p.env && p.env[0]) || '';
+    var keyRow = '<div class="prov-key">' +
+      '<input type="password" class="key-input" data-provider="' + esc(id) + '" autocomplete="off" ' +
+      'placeholder="' + (hasKey ? '(set — leave blank to keep)' : '(no key — paste to enable)') + '" />' +
+      (envHint ? '<span class="env">' + esc(envHint) + '</span>' : '') +
+      '</div>';
+    card.innerHTML = head + keyRow;
+    box.appendChild(card);
   });
+  if (!box.children.length) box.innerHTML = '<div class="empty">no callable providers reported by the bridge</div>';
 }
 
 function collectKeys() {
   var keys = {};
-  var cfg = state.config || {};
-  var existing = cfg.keys || {};
+  var existing = (state.config && state.config.keys) || {};
   document.querySelectorAll('.key-input').forEach(function (input) {
     var providerId = input.dataset.provider;
     var val = input.value.trim();
@@ -266,41 +317,11 @@ function collectKeys() {
   return keys;
 }
 
-// ---- providers -----------------------------------------------------------
+// ---- catalog (advanced) --------------------------------------------------
 
-function catalogMeta(id) {
-  return state.catalog.find(function (p) { return p.id === id; });
-}
-
-function uniqueProviders() {
-  var cfg = state.config || {};
-  var out = [];
-  (cfg.policy ? cfg.policy.trusted.concat(cfg.policy.fallback) : []).forEach(function (e) {
-    if (e && e.providerId && out.indexOf(e.providerId) === -1) out.push(e.providerId);
-  });
-  var allowed = (cfg.catalog && cfg.catalog.providers) || [];
-  allowed.forEach(function (id) { if (out.indexOf(id) === -1) out.push(id); });
-  if (cfg.defaultProviderId && out.indexOf(cfg.defaultProviderId) === -1) out.push(cfg.defaultProviderId);
-  // Always offer key rows for every provider the bridge can actually call.
-  (state.catalog || []).forEach(function (p) {
-    if (p && p.id && p.callable !== false && out.indexOf(p.id) === -1) out.push(p.id);
-  });
-  (state.builtin || []).forEach(function (id) {
-    if (id && out.indexOf(id) === -1) out.push(id);
-  });
-  return out;
-}
-
-function chosenCatalogIds() {
-  var configured = ((state.config && state.config.catalog && state.config.catalog.providers) || []);
-  if (configured.length) return configured;
-  // Registry-only / no allowlist yet: treat every callable catalog entry as on.
-  return (state.catalog || []).filter(function (p) { return p && p.callable !== false; }).map(function (p) { return p.id; });
-}
-
-function renderProviders() {
+function renderCatalog() {
   var q = (el('provider-search').value || '').toLowerCase();
-  var chosen = chosenCatalogIds();
+  var configured = ((state.config && state.config.catalog && state.config.catalog.providers) || []);
   var list = el('provider-list');
   list.innerHTML = '';
   var hits = state.catalog.filter(function (p) {
@@ -315,16 +336,13 @@ function renderProviders() {
   hits.forEach(function (p) {
     var row = document.createElement('label');
     row.className = 'provider-row';
-    var checked = chosen.indexOf(p.id) !== -1;
+    var checked = configured.indexOf(p.id) !== -1;
     row.innerHTML = '<input type="checkbox" data-provider="' + esc(p.id) + '"' + (checked ? ' checked' : '') + ' />' +
       '<span class="id">' + esc(p.id) + '</span>' +
       '<span class="meta">' + esc(p.name || '') + (p.modelCount ? ' · ' + p.modelCount + ' models' : '') + (p.minCost ? ' · from $' + p.minCost + '/1M' : '') + '</span>' +
       (p.callable ? '' : '<span class="meta" style="color:var(--warn)">(no api url)</span>');
     list.appendChild(row);
   });
-  el('builtin-list').innerHTML = (state.builtin || []).map(function (id) {
-    return '<span class="pill">' + esc(id) + '</span> ';
-  }).join('') || '<span class="muted">none</span>';
 }
 
 function collectCatalogChoice() {
@@ -337,11 +355,19 @@ function collectCatalogChoice() {
 
 // ---- policy --------------------------------------------------------------
 
+function providerSelect(group, value) {
+  var sel = '<select class="lane-provider" data-group="' + group + '">';
+  knownProviderIds().forEach(function (id) {
+    sel += '<option value="' + esc(id) + '"' + (id === value ? ' selected' : '') + '>' + esc(id) + '</option>';
+  });
+  return sel + '</select>';
+}
+
 function laneRow(lane, group) {
   var row = document.createElement('div');
   row.className = 'lane';
   row.innerHTML =
-    '<input type="text" class="lane-provider" placeholder="provider id" value="' + esc(lane.providerId || '') + '" data-group="' + group + '" />' +
+    providerSelect(group, lane.providerId || '') +
     '<input type="text" class="lane-models" placeholder="models, comma-separated (empty = provider default)" value="' + esc((lane.models || []).join(', ')) + '" data-group="' + group + '" />' +
     '<button class="btn danger lane-remove">remove</button>';
   return row;
@@ -350,6 +376,13 @@ function laneRow(lane, group) {
 function renderPolicy() {
   var cfg = state.config || {};
   var policy = cfg.policy || { trusted: [], fallback: [] };
+
+  // Default-provider dropdown shares the same option set.
+  var dp = el('defaultProviderId');
+  dp.innerHTML = providerSelect('default', cfg.defaultProviderId || '')
+    .replace(/^<select[^>]*>/, '').replace(/<\/select>$/, '');
+  dp.value = cfg.defaultProviderId || '';
+
   var trusted = el('trusted-lanes');
   var fallback = el('fallback-lanes');
   trusted.innerHTML = '';
@@ -363,9 +396,7 @@ function renderPolicy() {
   var bo = policy.backoff;
   el('backoffType').value = bo ? bo.type : 'none';
   if (bo) { el('backoffBase').value = bo.baseMs; el('backoffMax').value = bo.maxMs || ''; }
-  var cfg2 = state.config || {};
-  el('defaultProviderId').value = cfg2.defaultProviderId || '';
-  el('defaultModel').value = cfg2.defaultModel || '';
+  el('defaultModel').value = cfg.defaultModel || '';
 }
 
 function collectPolicy() {
@@ -397,7 +428,7 @@ function collectPolicy() {
 function renderReliability() {
   var cd = state.config && state.config.cooldown;
   if (!cd || cd.type === 'circuit-breaker') {
-    el('cooldownType').value = cd ? 'circuit-breaker' : 'circuit-breaker';
+    el('cooldownType').value = 'circuit-breaker';
     el('cdThreshold').value = (cd && cd.failureThreshold) || 3;
     el('cdBase').value = (cd && cd.baseTripMs) || 15000;
     el('cdMax').value = (cd && cd.maxTripMs) || 120000;
@@ -454,7 +485,7 @@ async function loadAll() {
     var cat = await api('/v1/catalog');
     state.catalog = cat.providers || [];
     state.builtin = cat.builtin || [];
-    renderKeys(); renderProviders(); renderPolicy(); renderReliability();
+    renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
     refreshHealth();
   } catch (err) {
     showErrors(['Failed to load settings: ' + err.message]);
@@ -488,7 +519,7 @@ function refreshHealth() {
 
 document.getElementById('apply').addEventListener('click', apply);
 document.getElementById('reload').addEventListener('click', loadAll);
-document.getElementById('provider-search').addEventListener('input', renderProviders);
+document.getElementById('provider-search').addEventListener('input', renderCatalog);
 document.addEventListener('click', function (ev) {
   var t = ev.target;
   if (t.classList && t.classList.contains('lane-remove')) { t.closest('.lane').remove(); return; }
