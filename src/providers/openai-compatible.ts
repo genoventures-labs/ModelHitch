@@ -240,6 +240,39 @@ export function mapHTTPError(
   }
 }
 
+/** True when an upstream 4xx is specifically a `response_format` rejection. */
+function isResponseFormatRejection(status: number, text: string): boolean {
+  return status === 400 && /response_format/i.test(text);
+}
+
+const JSON_INSTRUCTION = 'Respond with valid JSON only, no prose.';
+
+/**
+ * Degrade a request body that sent `response_format` to a model which
+ * rejected it (e.g. DeepSeek V4): drop the param and enforce JSON via a
+ * system instruction instead — same strategy as the Anthropic wire.
+ */
+function degradeResponseFormatBody(body: Record<string, unknown>): Record<string, unknown> {
+  const degraded = { ...body };
+  delete degraded.response_format;
+  const messages = Array.isArray(degraded.messages) ? [...degraded.messages] : [];
+  let patched = false;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as { role?: string; content?: unknown } | undefined;
+    if (m?.role === 'system') {
+      messages[i] = {
+        ...m,
+        content: `${typeof m.content === 'string' && m.content ? `${m.content}\n\n` : ''}${JSON_INSTRUCTION}`,
+      };
+      patched = true;
+      break;
+    }
+  }
+  if (!patched) messages.unshift({ role: 'system', content: JSON_INSTRUCTION });
+  degraded.messages = messages;
+  return degraded;
+}
+
 /** A Provider backed by any OpenAI-compatible /chat/completions API. */
 export class OpenAICompatibleProvider implements Provider {
   readonly id: string;
@@ -247,9 +280,7 @@ export class OpenAICompatibleProvider implements Provider {
   readonly defaultModel: string;
   readonly capabilities: Capabilities;
   private readonly config: OpenAICompatibleConfig;
-  private readonly fetchImpl: typeof fetch;
-
-  constructor(config: OpenAICompatibleConfig) {
+  private readonly fetchImpl: typeof fetch;  constructor(config: OpenAICompatibleConfig) {
     this.config = config;
     this.id = config.id;
     this.name = config.name;
@@ -331,7 +362,19 @@ export class OpenAICompatibleProvider implements Provider {
   }
 
   async chat(params: ChatParams, credentials: ProviderCredentials): Promise<ChatResult> {
-    const res = await this.request('/chat/completions', params, credentials, this.buildBody(params, false));
+    const body = this.buildBody(params, false);
+    let res = await this.request('/chat/completions', params, credentials, body);
+    if (!res.ok && body.response_format !== undefined) {
+      // Some models reject response_format outright (e.g. DeepSeek V4:
+      // "This response_format type is unavailable now"). Retry once with the
+      // param stripped and JSON enforced via instruction.
+      const errText = await res.text();
+      if (isResponseFormatRejection(res.status, errText)) {
+        res = await this.request('/chat/completions', params, credentials, degradeResponseFormatBody(body));
+      } else {
+        throw mapHTTPError(res.status, this.id, errText, parseRetryAfter(res.headers.get('retry-after')));
+      }
+    }
     const text = await res.text();
     if (!res.ok) throw mapHTTPError(res.status, this.id, text, parseRetryAfter(res.headers.get('retry-after')));
     const data = safeJsonParse<OpenAIChatCompletion>(text, {});
@@ -357,7 +400,16 @@ export class OpenAICompatibleProvider implements Provider {
   }
 
   async *stream(params: ChatParams, credentials: ProviderCredentials): AsyncGenerator<StreamChunk> {
-    const res = await this.request('/chat/completions', params, credentials, this.buildBody(params, true));
+    const reqBody = this.buildBody(params, true);
+    let res = await this.request('/chat/completions', params, credentials, reqBody);
+    if (!res.ok && reqBody.response_format !== undefined) {
+      const errText = await res.text();
+      if (isResponseFormatRejection(res.status, errText)) {
+        res = await this.request('/chat/completions', params, credentials, degradeResponseFormatBody(reqBody));
+      } else {
+        throw mapHTTPError(res.status, this.id, errText, parseRetryAfter(res.headers.get('retry-after')));
+      }
+    }
     if (!res.ok) {
       const text = await res.text();
       throw mapHTTPError(res.status, this.id, text, parseRetryAfter(res.headers.get('retry-after')));

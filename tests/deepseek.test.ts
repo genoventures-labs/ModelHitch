@@ -87,3 +87,114 @@ describe('deepseek default provider', () => {
     }
   });
 });
+
+describe('response_format rejection fallback', () => {
+  // DeepSeek V4 rejects response_format outright:
+  // "This response_format type is unavailable now". The provider must retry
+  // once without the param, enforcing JSON via a system instruction instead.
+  function rejectionThenOkFetch() {
+    const calls: CapturedRequest[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+      calls.push({ url, init: init ?? {}, body: JSON.parse(String(init?.body ?? '{}')) });
+      if (calls.length === 1) {
+        return new Response(
+          JSON.stringify({ error: { message: 'This response_format type is unavailable now', type: 'invalid_request_error' } }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: '{"ok":true}' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+    return { fetchImpl, calls };
+  }
+
+  function providerWith(fetchImpl: typeof fetch) {
+    return createOpenAICompatibleProvider({
+      id: 'deepseek',
+      name: 'DeepSeek',
+      baseUrl: 'https://api.deepseek.com',
+      defaultModel: 'deepseek-v4-flash',
+      apiKeyEnvVar: 'DEEPSEEK_API_KEY',
+      fetchImpl,
+    });
+  }
+
+  const jsonParams: ChatParams = {
+    model: 'deepseek-v4-flash',
+    messages: [{ role: 'user', content: 'give me json' }],
+    responseFormat: { type: 'json_object' },
+  };
+
+  it('chat retries once without response_format and appends the JSON instruction', async () => {
+    const { fetchImpl, calls } = rejectionThenOkFetch();
+    const result = await providerWith(fetchImpl).chat(jsonParams, { apiKey: 'k' });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.response_format).toEqual({ type: 'json_object' });
+    expect(calls[1]!.body.response_format).toBeUndefined();
+    const sys = calls[1]!.body.messages as Array<{ role: string; content: string }>;
+    expect(sys[0]!.role).toBe('system');
+    expect(sys[0]!.content).toContain('Respond with valid JSON only');
+    expect(result.message.content).toBe('{"ok":true}');
+  });
+
+  it('appends the instruction to an existing system message', async () => {
+    const { fetchImpl, calls } = rejectionThenOkFetch();
+    await providerWith(fetchImpl).chat(
+      { ...jsonParams, messages: [{ role: 'system', content: 'be terse' }, { role: 'user', content: 'go' }] },
+      { apiKey: 'k' },
+    );
+    const sys = (calls[1]!.body.messages as Array<{ role: string; content: string }>)[0]!;
+    expect(sys.content).toContain('be terse');
+    expect(sys.content).toContain('Respond with valid JSON only');
+  });
+
+  it('stream retries once with the degraded body', async () => {
+    const calls: CapturedRequest[] = [];
+    const sse = (obj: unknown) =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(obj)}\n\n`));
+            controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      );
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+      calls.push({ url, init: init ?? {}, body: JSON.parse(String(init?.body ?? '{}')) });
+      if (calls.length === 1) {
+        return new Response('{"error":{"message":"This response_format type is unavailable now"}}', { status: 400 });
+      }
+      return sse({ choices: [{ delta: { content: '{}' }, finish_reason: null }] });
+    };
+    const chunks: string[] = [];
+    for await (const c of providerWith(fetchImpl).stream(jsonParams, { apiKey: 'k' })) {
+      if (c.type === 'text-delta') chunks.push(c.text);
+    }
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.body.response_format).toBeUndefined();
+    expect(chunks.join('')).toBe('{}');
+  });
+
+  it('unrelated 400s still throw immediately (no retry)', async () => {
+    const calls: CapturedRequest[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      calls.push({ url: 'x', init: init ?? {}, body: JSON.parse(String(init?.body ?? '{}')) });
+      return new Response('{"error":{"message":"context length exceeded"}}', { status: 400 });
+    };
+    const err = await providerWith(fetchImpl)
+      .chat(jsonParams, { apiKey: 'k' })
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(ModelHitchError);
+    expect((err as ModelHitchError).code).toBe('bad-request');
+    expect(calls).toHaveLength(1);
+  });
+});
