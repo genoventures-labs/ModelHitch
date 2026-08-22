@@ -106,7 +106,7 @@ export function settingsPageHtml(): string {
   .badge { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; border: 1px solid var(--accent-dim); color: var(--accent); border-radius: 3px; padding: 1px 6px; }
   .prov-key { display: flex; align-items: center; gap: 10px; margin-top: 7px; }
   .prov-key input { flex: 1; min-width: 200px; }
-  .prov-key .env { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .prov-key .env { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 
   .search { margin-bottom: 10px; }
   .provider-row { display: flex; align-items: center; gap: 10px; padding: 6px 4px; border-bottom: 1px solid var(--line); cursor: pointer; }

@@ -4,10 +4,13 @@ import {
   type ImageGenerationConfig,
   type ModelHitchConfig,
 } from './config.js';
+import type { TrustListEntry } from './core/policy.js';
 
 export interface SettingsFormState {
   defaultProviderId: string;
   defaultModel: string;
+  trustedLanes: string;
+  fallbackLanes: string;
   imageEnabled: boolean;
   imageProvider: 'openai' | 'gemini';
   imageModel: string;
@@ -19,12 +22,34 @@ export interface SettingsFormState {
   maxTripMs: string;
 }
 
+function formatLanes(lanes: readonly TrustListEntry[] | undefined): string {
+  return (lanes ?? [])
+    .map((lane) => `${lane.providerId}${lane.models?.length ? `/${lane.models.join(',')}` : ''}`)
+    .join('; ');
+}
+
+function parseLanes(value: string, field: string): TrustListEntry[] {
+  if (!value.trim()) return [];
+  return value.split(';').map((rawLane) => {
+    const route = rawLane.trim();
+    const slash = route.indexOf('/');
+    const providerId = (slash === -1 ? route : route.slice(0, slash)).trim();
+    if (!providerId) throw new Error(`${field} contains a lane without a provider id.`);
+    if (slash === -1) return { providerId };
+    const models = route.slice(slash + 1).split(',').map((model) => model.trim()).filter(Boolean);
+    if (!models.length) throw new Error(`${field} lane "${providerId}" must name a model after "/".`);
+    return { providerId, models };
+  });
+}
+
 export function configToSettingsForm(config: ModelHitchConfig): SettingsFormState {
   const image = config.imageGeneration;
   const cooldown = config.cooldown;
   return {
     defaultProviderId: config.defaultProviderId ?? '',
     defaultModel: config.defaultModel ?? '',
+    trustedLanes: formatLanes(config.policy?.trusted),
+    fallbackLanes: formatLanes(config.policy?.fallback),
     imageEnabled: image?.enabled ?? false,
     imageProvider: image?.providerId ?? 'openai',
     imageModel: image?.model ?? 'gpt-image-2',
@@ -59,6 +84,14 @@ export function applySettingsForm(config: ModelHitchConfig, form: SettingsFormSt
   else delete next.defaultProviderId;
   if (defaultModel) next.defaultModel = defaultModel;
   else delete next.defaultModel;
+
+  const trusted = parseLanes(form.trustedLanes, 'Trusted lanes');
+  const fallback = parseLanes(form.fallbackLanes, 'Fallback lanes');
+  if (trusted.length || fallback.length) {
+    next.policy = { ...next.policy, trusted, fallback };
+  } else {
+    delete next.policy;
+  }
 
   const image: ImageGenerationConfig = {
     enabled: form.imageEnabled,

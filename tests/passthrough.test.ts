@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createOpenAICompatibleProvider } from '../src/providers/openai-compatible.js';
+import { createOpenAICompatibleProvider, mapHTTPError } from '../src/providers/openai-compatible.js';
 import type { ChatParams, ProviderCredentials } from '../src/core/types.js';
+import { isRetryableError } from '../src/core/failover.js';
 import { toModelHitchResponseFormat, toModelHitchToolChoice } from '../src/server/mapping.js';
 import { mockProvider } from '../src/providers/mock.js';
 
@@ -35,6 +36,30 @@ const baseParams: ChatParams = {
   model: 'test-model',
   messages: [{ role: 'user', content: 'hi' }],
 };
+
+describe('OpenAI-compatible error mapping', () => {
+  it('retries an upstream model-unavailable failure wrapped in HTTP 400', () => {
+    const body = JSON.stringify({
+      error: {
+        message: 'Provider "opencode-zen" rejected the request. ({"error":{"type":"server_error","message":"Error from provider (Console): Upstream request failed: Model is unavailable."}})',
+        type: 'invalid_request_error',
+        code: 'bad-request',
+      },
+    });
+
+    const error = mapHTTPError(400, 'openai', body);
+
+    expect(error).toMatchObject({ code: 'provider-error', status: 400, providerId: 'openai' });
+    expect(isRetryableError(error)).toBe(true);
+  });
+
+  it('keeps genuine HTTP 400 request errors non-retryable', () => {
+    const error = mapHTTPError(400, 'openai', '{"error":{"message":"messages is required"}}');
+
+    expect(error.code).toBe('bad-request');
+    expect(isRetryableError(error)).toBe(false);
+  });
+});
 
 describe('tool_choice / response_format passthrough (OpenAI-compatible adapter)', () => {
   it('forwards tool_choice and response_format in the request body', async () => {

@@ -130,6 +130,8 @@ async function run(): Promise<void> {
 
   const defaultProvider = input('default-provider', form.defaultProviderId, 'provider id');
   const defaultModel = input('default-model', form.defaultModel, 'provider default');
+  const trustedLanes = input('trusted-lanes', form.trustedLanes, 'provider/model; provider/model');
+  const fallbackLanes = input('fallback-lanes', form.fallbackLanes, 'provider/model; provider/model');
   const imageEnabled = tabs('image-enabled', ['off', 'on'], form.imageEnabled ? 'on' : 'off');
   const imageProvider = tabs('image-provider', ['openai', 'gemini'], form.imageProvider);
   const openAIModels = ['gpt-image-2', 'gpt-image-1.5'];
@@ -145,22 +147,24 @@ async function run(): Promise<void> {
   for (const child of [
     field('Default provider', defaultProvider),
     field('Default model', defaultModel),
+    field('Trusted lanes  (provider/model,model; ...)', trustedLanes),
+    field('Fallback lanes (provider/model,model; ...)', fallbackLanes),
+    new TextRenderable(renderer, {
+      content: 'Rotation walks trusted lanes first, then fallback lanes.',
+      fg: MUTED,
+      flexGrow: 1,
+    }),
+  ]) left.add(child);
+  for (const child of [
     field('Image lane', imageEnabled),
     field('Image provider', imageProvider),
     field('Image model', imageModel),
     field('OpenAI quality', imageQuality),
     field('Image size', imageSize),
-  ]) left.add(child);
-  for (const child of [
     field('Cooldown engine', cooldownType),
     field('Failure threshold', failureThreshold),
     field('Base trip ms', baseTripMs),
     field('Maximum trip ms', maxTripMs),
-    new TextRenderable(renderer, {
-      content: 'Policy lanes, catalog choices, and API keys are preserved. Use environment variables or /settings for secrets.',
-      fg: MUTED,
-      flexGrow: 1,
-    }),
   ]) right.add(child);
   body.add(left);
   body.add(right);
@@ -170,6 +174,8 @@ async function run(): Promise<void> {
   const focusables: Array<{ focus(): void; blur(): void }> = [
     defaultProvider,
     defaultModel,
+    trustedLanes,
+    fallbackLanes,
     imageEnabled,
     imageProvider,
     imageModel,
@@ -200,6 +206,8 @@ async function run(): Promise<void> {
       const next = applySettingsForm(config, {
         defaultProviderId: defaultProvider.value,
         defaultModel: defaultModel.value,
+        trustedLanes: trustedLanes.value,
+        fallbackLanes: fallbackLanes.value,
         imageEnabled: selectedValue<'off' | 'on'>(imageEnabled) === 'on',
         imageProvider: selectedValue<'openai' | 'gemini'>(imageProvider),
         imageModel: selectedValue<string>(imageModel),

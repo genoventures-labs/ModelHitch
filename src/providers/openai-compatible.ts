@@ -195,6 +195,15 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+/** Some OpenAI-compatible gateways wrap upstream 5xx/unavailable errors in HTTP 400. */
+function isTransientUpstreamError(bodyText: string): boolean {
+  const normalized = bodyText.toLowerCase();
+  return (
+    /"(?:type|code)"\s*:\s*"(?:server_error|model_unavailable|service_unavailable)"/.test(normalized) ||
+    /\bmodel\b.{0,80}\b(?:is\s+)?(?:currently\s+|temporarily\s+)?unavailable\b/.test(normalized)
+  );
+}
+
 /** Map an HTTP status to a ModelHitchError with a friendly message. */
 export function mapHTTPError(
   status: number,
@@ -227,6 +236,12 @@ export function mapHTTPError(
         { status, providerId },
       );
     case 400:
+      if (isTransientUpstreamError(bodyText)) {
+        return new ModelHitchError('provider-error', `Provider "${providerId}" is temporarily unavailable.${detail}`, {
+          status,
+          providerId,
+        });
+      }
       return new ModelHitchError('bad-request', `Provider "${providerId}" rejected the request.${detail}`, {
         status,
         providerId,

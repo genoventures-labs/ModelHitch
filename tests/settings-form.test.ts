@@ -27,6 +27,27 @@ describe('settings TUI form mapping', () => {
     expect(next.catalog).toEqual(config.catalog);
   });
 
+  it('edits trusted and fallback rotation lanes with compact route syntax', () => {
+    const next = applySettingsForm(config, form({
+      trustedLanes: 'openai/gpt-5,gpt-4.1; opencode-zen/big-pickle',
+      fallbackLanes: 'opencode-go/deepseek-v4-flash; ollama',
+    }));
+    expect(next.policy).toEqual({
+      trusted: [
+        { providerId: 'openai', models: ['gpt-5', 'gpt-4.1'] },
+        { providerId: 'opencode-zen', models: ['big-pickle'] },
+      ],
+      fallback: [
+        { providerId: 'opencode-go', models: ['deepseek-v4-flash'] },
+        { providerId: 'ollama' },
+      ],
+    });
+  });
+
+  it('rejects incomplete lane routes before writing', () => {
+    expect(() => applySettingsForm(config, form({ trustedLanes: 'openai/' }))).toThrow(/must name a model/);
+  });
+
   it('maps Gemini and memory cooldown settings', () => {
     const next = applySettingsForm(config, form({
       imageProvider: 'gemini',

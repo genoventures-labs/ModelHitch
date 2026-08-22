@@ -9,6 +9,7 @@
  *   modelhitch front      stop the background one and run the bridge in this terminal
  *   modelhitch stop       stop the background bridge
  *   modelhitch settings   edit local settings in an OpenTUI terminal interface
+ *   modelhitch settings --web  open the bridge settings UI in a browser
  *   modelhitch setup codex  install the ModelHitch skill for Codex
  *   modelhitch --version  print the version
  *   modelhitch --help     print help
@@ -19,9 +20,9 @@
  *   MODELHITCH_MAX_BODY_BYTES  max request body for the bridge (default 64 MiB)
  *   MODELHITCH_HOME       directory for the background pid/log (default ~/.modelhitch)
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { printAsciiLogo } from './ascii.js';
@@ -170,6 +171,7 @@ Usage:
   modelhitch front                               stop the background one, run the bridge in this terminal
   modelhitch stop                                stop the background bridge
   modelhitch settings                            edit local config in an OpenTUI interface
+  modelhitch settings --web                      open the bridge settings UI in a browser
   modelhitch settings --config <path>            edit a specific config file
   modelhitch setup <agent>                       install skills for codex, claude, cursor, vscode, or all
   modelhitch --version                           print the version
@@ -540,6 +542,35 @@ function runSettings(args: string[]): void {
   if (result.status !== 0) process.exitCode = result.status ?? 1;
 }
 
+function openBrowser(url: string): void {
+  const os = platform();
+  const command = os === 'win32' ? 'cmd.exe' : os === 'darwin' ? 'open' : 'xdg-open';
+  const args = os === 'win32' ? ['/c', 'start', '', url] : [url];
+  const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
+  child.unref();
+}
+
+async function runWebSettings(): Promise<void> {
+  const port = Number(process.env.MODELHITCH_PORT ?? 3939);
+  const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
+  const url = `http://${host}:${port}/settings`;
+  let response: Response;
+  try {
+    response = await fetch(url, { signal: AbortSignal.timeout(1500) });
+  } catch {
+    throw new Error(`No ModelHitch bridge is responding at ${url}. Start it with \`modelhitch bridge --background\`.`);
+  }
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!response.ok || !contentType.includes('text/html')) {
+    throw new Error(
+      `The bridge at ${url} does not provide the settings UI (HTTP ${response.status}, ${contentType || 'unknown content type'}). ` +
+      'Stop it and restart it with this ModelHitch version.',
+    );
+  }
+  openBrowser(url);
+  console.log(`Opened ${url}`);
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const [cmd] = args;
@@ -577,7 +608,8 @@ async function main(): Promise<void> {
       await runConfig(args.slice(1));
       break;
     case 'settings':
-      runSettings(args.slice(1));
+      if (args.includes('--web')) await runWebSettings();
+      else runSettings(args.slice(1));
       break;
     default:
       console.log(`Unknown command: ${cmd}\n`);
