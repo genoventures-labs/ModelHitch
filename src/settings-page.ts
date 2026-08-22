@@ -162,12 +162,14 @@ export function settingsPageHtml(): string {
           <select id="imageProvider">
             <option value="openai">OpenAI</option>
             <option value="gemini">Google Gemini</option>
-            <option value="huggingface">Hugging Face</option>
           </select>
         </div>
         <div class="grow">
           <label>model</label>
-          <input id="imageModel" type="text" placeholder="gpt-image-1" />
+          <select id="imageModel">
+            <option value="gpt-image-2">gpt-image-2</option>
+            <option value="gpt-image-1.5">gpt-image-1.5</option>
+          </select>
         </div>
       </div>
       <div class="row" style="border-bottom:0">
@@ -176,7 +178,6 @@ export function settingsPageHtml(): string {
           <select id="imageQuality">
             <option value="low">low</option>
             <option value="medium">medium</option>
-            <option value="high">high</option>
           </select>
         </div>
         <div class="grow">
@@ -414,14 +415,25 @@ function laneRow(lane, group) {
   return row;
 }
 
+function setImageModels(providerId, selected) {
+  var models = providerId === 'gemini'
+    ? ['gemini-3.1-flash-image', 'gemini-3.1-flash-lite-image', 'gemini-3-pro-image', 'gemini-2.5-flash-image']
+    : ['gpt-image-2', 'gpt-image-1.5'];
+  el('imageModel').innerHTML = models.map(function (model) {
+    return '<option value="' + model + '">' + model + '</option>';
+  }).join('');
+  el('imageModel').value = models.indexOf(selected) === -1 ? models[0] : selected;
+}
+
 function renderImageGeneration() {
   var cfg = state.config || {};
-  var image = cfg.imageGeneration || { enabled: false, providerId: 'openai', model: 'gpt-image-1', quality: 'medium', size: '1024x1024' };
+  var image = cfg.imageGeneration || { enabled: false, providerId: 'openai', model: 'gpt-image-2', quality: 'medium', size: '1024x1024' };
   el('imageEnabled').value = String(!!image.enabled);
   el('imageProvider').value = image.providerId || 'openai';
-  el('imageModel').value = image.model || 'gpt-image-1';
+  setImageModels(image.providerId || 'openai', image.model || 'gpt-image-2');
   el('imageQuality').value = image.quality || 'medium';
   el('imageSize').value = image.size || '1024x1024';
+  el('imageQuality').disabled = image.providerId === 'gemini';
 }
 
 function collectImageGeneration() {
@@ -429,7 +441,7 @@ function collectImageGeneration() {
   var cfg = {
     enabled: enabled,
     providerId: el('imageProvider').value || 'openai',
-    model: el('imageModel').value.trim() || 'gpt-image-1',
+    model: el('imageModel').value.trim() || (el('imageProvider').value === 'gemini' ? 'gemini-3.1-flash-image' : 'gpt-image-2'),
     quality: el('imageQuality').value || 'medium',
     size: el('imageSize').value.trim() || '1024x1024',
   };
@@ -584,6 +596,15 @@ function refreshHealth() {
 document.getElementById('apply').addEventListener('click', apply);
 document.getElementById('reload').addEventListener('click', loadAll);
 document.getElementById('provider-search').addEventListener('input', renderCatalog);
+document.getElementById('imageProvider').addEventListener('change', function () {
+  var gemini = el('imageProvider').value === 'gemini';
+  setImageModels(el('imageProvider').value, gemini ? 'gemini-3.1-flash-image' : 'gpt-image-2');
+  el('imageQuality').disabled = gemini;
+  if (!gemini) el('imageQuality').value = 'medium';
+});
+document.getElementById('imageModel').addEventListener('change', function () {
+  if (el('imageModel').value === 'gpt-image-1.5') el('imageQuality').value = 'medium';
+});
 document.addEventListener('click', function (ev) {
   var t = ev.target;
   if (t.classList && t.classList.contains('lane-remove')) { t.closest('.lane').remove(); return; }

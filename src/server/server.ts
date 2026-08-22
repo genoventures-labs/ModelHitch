@@ -64,6 +64,7 @@ import { clearConversations, findConversationWithToolCall, rememberConversation 
 import { normalizeBodyImages } from './local-images.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 import type { ImageGenerationConfig } from '../config.js';
+import { safeJsonParse } from '../core/json.js';
 
 export interface ModelHitchServerOptions {
   /** Providers to serve. Defaults to the built-in set. */
@@ -76,6 +77,8 @@ export interface ModelHitchServerOptions {
   defaultModel?: string;
   /** Dedicated image lane config, disabled by default. */
   imageGeneration?: ImageGenerationConfig;
+  /** Image upstream fetch implementation. Primarily useful for deterministic tests. */
+  imageFetch?: typeof fetch;
   /** Per-provider API key overrides, e.g. `{ 'opencode-zen': 'sk-...' }`. */
   apiKeys?: Record<string, string>;
   /** Per-provider base URL overrides. */
@@ -159,6 +162,22 @@ export interface ConfigBridge {
 }
 
 const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024; // images arrive as inline base64 — 10 MiB was too small
+
+const GEMINI_ASPECT_RATIOS = new Set(['1:1', '1:4', '1:8', '2:3', '3:2', '3:4', '4:1', '4:3', '4:5', '5:4', '8:1', '9:16', '16:9', '21:9']);
+
+function geminiImageConfig(size: string): { aspectRatio: string; imageSize: '1K' | '2K' | '4K' } | undefined {
+  const match = /^(\d+)x(\d+)$/.exec(size);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!width || !height || Math.max(width, height) > 4096) return undefined;
+  const gcd = (left: number, right: number): number => right === 0 ? left : gcd(right, left % right);
+  const divisor = gcd(width, height);
+  const aspectRatio = `${width / divisor}:${height / divisor}`;
+  if (!GEMINI_ASPECT_RATIOS.has(aspectRatio)) return undefined;
+  const longestEdge = Math.max(width, height);
+  return { aspectRatio, imageSize: longestEdge <= 1024 ? '1K' : longestEdge <= 2048 ? '2K' : '4K' };
+}
 
 /** A routable lane: provider + model + the credentials to call it with. */
 interface ResolvedLane extends FailoverTarget {
@@ -541,41 +560,60 @@ export class OpenAICompatibleServer {
 
   private async handleImageGeneration(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = (await this.readBody(req)) as Record<string, unknown> | null;
+    const requestBody = (body ?? {}) as Record<string, unknown>;
     if (!this.imageGeneration?.enabled) {
       throw new ModelHitchError(
-        'forbidden',
+        'bad-request',
         'The image lane is disabled by default. Enable it in /settings or with modelhitch bridge --image-lane.',
         { status: 403 },
       );
     }
-    const prompt = typeof body?.prompt === 'string' ? body.prompt.trim() : '';
+    const prompt = typeof requestBody.prompt === 'string' ? requestBody.prompt.trim() : '';
     if (!prompt) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'prompt'.", { status: 400 });
     }
     const cfg = this.imageGeneration;
-    const providerId = (typeof body?.providerId === 'string' && body.providerId) || (typeof body?.provider === 'string' && body.provider) || cfg.providerId || 'openai';
+    const providerId = cfg.providerId || 'openai';
     const provider = this.providerFor(providerId) ?? this.providers.find((p) => p.id === providerId);
     if (!provider) {
       throw new ModelHitchError('bad-request', `Image lane provider "${providerId}" is unavailable.`, { status: 400, providerId });
     }
-    const model = (typeof body?.model === 'string' && body.model.trim()) || cfg.model || provider.defaultModel;
-    const quality = (typeof body?.quality === 'string' && body.quality) || cfg.quality || 'medium';
-    const size = (typeof body?.size === 'string' && body.size.trim()) || cfg.size || '1024x1024';
-    const count = Number.isInteger(body?.n) ? Math.max(1, Number(body.n)) : 1;
-    const responseFormat = body?.response_format === 'b64_json' ? 'b64_json' : 'url';
+    const model = (typeof requestBody.model === 'string' && requestBody.model.trim()) || cfg.model || (providerId === 'gemini' ? 'gemini-3.1-flash-image' : 'gpt-image-2');
+    const quality = (typeof requestBody.quality === 'string' && requestBody.quality) || cfg.quality || 'medium';
+    const size = (typeof requestBody.size === 'string' && requestBody.size.trim()) || cfg.size || '1024x1024';
+    const count = Number.isInteger(requestBody.n) ? Math.max(1, Number(requestBody.n)) : 1;
+
+    if (providerId === 'openai') {
+      if (!['gpt-image-2', 'gpt-image-1.5'].includes(model)) {
+        throw new ModelHitchError('bad-request', 'The OpenAI image lane supports gpt-image-2 and gpt-image-1.5.', { status: 400, providerId });
+      }
+      if ((model === 'gpt-image-1.5' && quality !== 'medium') || (model === 'gpt-image-2' && !['low', 'medium'].includes(quality))) {
+        throw new ModelHitchError('bad-request', `${model} does not support quality "${quality}" in this image lane.`, { status: 400, providerId });
+      }
+    } else if (providerId === 'gemini') {
+      if (!['gemini-3.1-flash-lite-image', 'gemini-3.1-flash-image', 'gemini-3-pro-image', 'gemini-2.5-flash-image'].includes(model)) {
+        throw new ModelHitchError('bad-request', `Gemini model "${model}" is not a supported image model.`, { status: 400, providerId });
+      }
+      if (count !== 1) {
+        throw new ModelHitchError('bad-request', 'The Gemini image lane supports one generated image per request.', { status: 400, providerId });
+      }
+    }
 
     const credentials = await this.resolveCredentials(providerId);
     const base = (credentials.baseUrl ?? {
       openai: 'https://api.openai.com/v1',
       gemini: 'https://generativelanguage.googleapis.com/v1beta',
-      huggingface: 'https://router.huggingface.co/v1',
     }[providerId] ?? 'https://api.openai.com/v1').replace(/\/+$/, '');
 
     let payload: Record<string, unknown>;
     if (providerId === 'gemini') {
+      const imageConfig = geminiImageConfig(size);
+      if (!imageConfig) {
+        throw new ModelHitchError('bad-request', `Size "${size}" cannot be mapped to a supported Gemini aspect ratio and image size.`, { status: 400, providerId });
+      }
       payload = {
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+        generationConfig: { responseModalities: ['IMAGE'], imageConfig },
       };
     } else {
       payload = {
@@ -584,7 +622,6 @@ export class OpenAICompatibleServer {
         n: count,
         size,
         quality,
-        response_format: responseFormat,
       };
     }
 
@@ -604,11 +641,11 @@ export class OpenAICompatibleServer {
       headers.Authorization = `Bearer ${apiKey}`;
     }
 
-    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+    const response = await (this.options.imageFetch ?? fetch)(url, { method: 'POST', headers, body: JSON.stringify(payload) });
     const text = await response.text();
     if (!response.ok) {
       throw new ModelHitchError(
-        providerId === 'huggingface' ? 'provider-error' : 'provider-error',
+        'provider-error',
         `Image generation via "${providerId}" failed: ${text || 'unknown upstream error'}`,
         { status: response.status, providerId },
       );
@@ -622,11 +659,12 @@ export class OpenAICompatibleServer {
         .filter((part) => part && part.inlineData && typeof part.inlineData.data === 'string')
         .map((part) => ({ b64_json: part.inlineData!.data, revised_prompt: parts.map((p) => p.text).filter(Boolean).join('\n') || undefined }));
     } else {
-      imageData = Array.isArray(data.data) ? data.data.map((item) => ({
-        url: typeof item?.url === 'string' ? item.url : undefined,
-        b64_json: typeof item?.b64_json === 'string' ? item.b64_json : undefined,
-        revised_prompt: typeof item?.revised_prompt === 'string' ? item.revised_prompt : undefined,
-      })) : [];
+      const items = Array.isArray(data.data) ? (data.data as Array<Record<string, unknown>>) : [];
+      imageData = items.map((item) => ({
+        url: typeof item.url === 'string' ? item.url : undefined,
+        b64_json: typeof item.b64_json === 'string' ? item.b64_json : undefined,
+        revised_prompt: typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined,
+      }));
     }
     if (!imageData.length) {
       throw new ModelHitchError('provider-error', `Image generation via "${providerId}" returned no image payload.`, { status: 502, providerId });

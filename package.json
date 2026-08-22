@@ -7,7 +7,7 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "modelhitch": "./dist/cli.js"
+    "modelhitch": "dist/cli.js"
   },
   "exports": {
     ".": {

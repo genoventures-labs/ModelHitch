@@ -167,6 +167,7 @@ The CLI bridge requires Node.js 22.5+ because SQLite usage persistence is enable
 | --- | --- |
 | `POST /v1/chat/completions` | OpenAI chat clients |
 | `POST /v1/responses` | Codex and Responses clients |
+| `POST /v1/images/generations` | OpenAI-compatible image generation (opt-in) |
 | `POST /v1/messages` | Claude and Anthropic clients |
 | `POST /v1beta/models/{model}:generateContent` | Gemini clients |
 | `GET /v1/models`, `GET /healthz` | Discovery and health |
@@ -181,6 +182,22 @@ nonempty `apiKey` field before they will send a request. The bridge resolves cre
 and ignores the incoming Authorization header, so you can supply any harmless bridge-local
 placeholder such as `sk-bridge-local` — never a real user key — solely to satisfy that client-side
 validation.
+
+### Image generation
+
+The dedicated image lane is disabled by default. Enable and configure it in `/settings`, or for a
+bridge process with CLI flags:
+
+```bash
+npx modelhitch bridge --image-lane --image-provider openai --image-model gpt-image-2 --image-quality low
+```
+
+The verified OpenAI combinations are `gpt-image-2` at low or medium quality and
+`gpt-image-1.5` at medium quality. Gemini uses its native image models, with
+`gemini-3.1-flash-image` as the default. Configure `OPENAI_API_KEY` or `GEMINI_API_KEY` locally,
+then send OpenAI-shaped generation requests to `POST /v1/images/generations`. Responses contain
+base64 image data in `data[].b64_json`. Hugging Face is intentionally not exposed by this lane
+because its text-to-image API uses a different request and raw-binary response contract.
 
 Environment controls:
 

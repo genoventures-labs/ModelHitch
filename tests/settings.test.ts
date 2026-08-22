@@ -55,8 +55,10 @@ describe('config validity + serialization', () => {
 
   it('image generation is disabled by default and validates when enabled', () => {
     const tpl = defaultConfigTemplate();
-    expect(tpl.imageGeneration).toMatchObject({ enabled: false });
-    expect(validateConfig({ version: 1, imageGeneration: { enabled: true, providerId: 'openai' } }).errors).toEqual([]);
+    expect(tpl.imageGeneration).toMatchObject({ enabled: false, providerId: 'openai', model: 'gpt-image-2' });
+    expect(validateConfig({ version: 1, imageGeneration: { enabled: true, providerId: 'openai', model: 'gpt-image-2', quality: 'low' } }).errors).toEqual([]);
+    expect(validateConfig({ version: 1, imageGeneration: { enabled: true, providerId: 'openai', model: 'gpt-image-1.5', quality: 'low' } }).errors.join('\n')).toMatch(/medium quality/);
+    expect(validateConfig({ version: 1, imageGeneration: { enabled: true, providerId: 'huggingface' } }).errors.join('\n')).toMatch(/providerId/);
     expect(validateConfig({ version: 1, imageGeneration: { enabled: true, providerId: 'unknown' } }).errors.join('\n')).toMatch(/providerId/);
   });
 
@@ -231,6 +233,64 @@ describe('settings bridge endpoints', () => {
       expect(body.error.message).toMatch(/image lane/i);
     } finally {
       await server.close();
+    }
+  });
+
+  it('POST /v1/images/generations maps the verified OpenAI Image API contract', async () => {
+    let upstreamUrl = '';
+    let upstreamBody: Record<string, unknown> = {};
+    const imageServer = createModelHitchServer({
+      providers: defaultProviders,
+      apiKeys: { openai: 'sk-test' },
+      imageGeneration: { enabled: true, providerId: 'openai', model: 'gpt-image-2', quality: 'low', size: '1024x1024' },
+      imageFetch: async (input, init) => {
+        upstreamUrl = String(input);
+        upstreamBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ data: [{ b64_json: 'openai-image' }] }), { status: 200 });
+      },
+    });
+    const info = await imageServer.listen(0, '127.0.0.1');
+    try {
+      const res = await fetch(`${info.url}/v1/images/generations`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: 'A minimal icon' }),
+      });
+      expect(res.status).toBe(200);
+      expect(upstreamUrl).toBe('https://api.openai.com/v1/images/generations');
+      expect(upstreamBody).toMatchObject({ model: 'gpt-image-2', prompt: 'A minimal icon', quality: 'low', size: '1024x1024', n: 1 });
+      expect(upstreamBody).not.toHaveProperty('response_format');
+      expect(await res.json()).toMatchObject({ data: [{ b64_json: 'openai-image' }] });
+    } finally {
+      await imageServer.close();
+    }
+  });
+
+  it('POST /v1/images/generations maps Gemini image generation and normalizes inline data', async () => {
+    let upstreamUrl = '';
+    let upstreamBody: Record<string, unknown> = {};
+    const imageServer = createModelHitchServer({
+      providers: defaultProviders,
+      apiKeys: { gemini: 'gemini-test' },
+      imageGeneration: { enabled: true, providerId: 'gemini', model: 'gemini-3.1-flash-image', size: '2048x2048' },
+      imageFetch: async (input, init) => {
+        upstreamUrl = String(input);
+        upstreamBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ inlineData: { data: 'gemini-image', mimeType: 'image/png' } }] } }] }), { status: 200 });
+      },
+    });
+    const info = await imageServer.listen(0, '127.0.0.1');
+    try {
+      const res = await fetch(`${info.url}/v1/images/generations`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: 'A precise diagram' }),
+      });
+      expect(res.status).toBe(200);
+      expect(upstreamUrl).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent');
+      expect(upstreamBody).toMatchObject({
+        contents: [{ role: 'user', parts: [{ text: 'A precise diagram' }] }],
+        generationConfig: { responseModalities: ['IMAGE'], imageConfig: { aspectRatio: '1:1', imageSize: '2K' } },
+      });
+      expect(await res.json()).toMatchObject({ data: [{ b64_json: 'gemini-image' }] });
+    } finally {
+      await imageServer.close();
     }
   });
 

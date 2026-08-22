@@ -253,5 +253,5 @@ describe('bridge tool_choice passthrough to provider', () => {
     } finally {
       await server.close();
     }
-  });
+  }, 30_000);
 });

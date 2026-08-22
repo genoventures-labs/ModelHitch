@@ -161,8 +161,8 @@ Usage:
   modelhitch bridge --background                  start it in the background (terminal stays free)
   modelhitch bridge --image-lane                  enable the dedicated image generation lane
   modelhitch bridge --no-image-lane               disable the image generation lane
-  modelhitch bridge --image-provider openai       set the image lane provider (openai|gemini|huggingface)
-  modelhitch bridge --image-model gpt-image-1     set the default image model
+  modelhitch bridge --image-provider openai       set the image lane provider (openai|gemini)
+  modelhitch bridge --image-model gpt-image-2     set the default image model
   modelhitch status                              is a background bridge running?
   modelhitch front                               stop the background one, run the bridge in this terminal
   modelhitch stop                                stop the background bridge
@@ -215,13 +215,15 @@ async function runBridge(): Promise<void> {
     }
   }
   const config: ModelHitchConfig = loaded ?? defaultConfigTemplate();
-  if (imageFlag !== undefined) {
+  if (imageFlag !== undefined || imageProvider !== undefined || imageModel !== undefined || imageQuality !== undefined || imageSize !== undefined) {
+    const configuredProvider = imageProvider && ['openai', 'gemini'].includes(imageProvider)
+      ? (imageProvider as 'openai' | 'gemini')
+      : config.imageGeneration?.providerId ?? 'openai';
+    const providerChanged = configuredProvider !== config.imageGeneration?.providerId;
     config.imageGeneration = {
-      enabled: imageFlag,
-      providerId: imageProvider && ['openai', 'gemini', 'huggingface'].includes(imageProvider as string)
-        ? (imageProvider as 'openai' | 'gemini' | 'huggingface')
-        : config.imageGeneration?.providerId ?? 'openai',
-      model: imageModel ?? config.imageGeneration?.model ?? 'gpt-image-1',
+      enabled: imageFlag ?? config.imageGeneration?.enabled ?? false,
+      providerId: configuredProvider,
+      model: imageModel ?? (providerChanged ? undefined : config.imageGeneration?.model) ?? (configuredProvider === 'gemini' ? 'gemini-3.1-flash-image' : 'gpt-image-2'),
       quality: imageQuality && ['low', 'medium', 'high'].includes(imageQuality) ? (imageQuality as 'low' | 'medium' | 'high') : config.imageGeneration?.quality ?? 'medium',
       size: imageSize ?? config.imageGeneration?.size ?? '1024x1024',
     };

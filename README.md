@@ -85,7 +85,7 @@ or `--force` to update an existing install.
 | **Web apps** | Browser bundler support via `modelhitch/browser` — no Node polyfills |
 | **BYOK** | Request keys, memory storage, browser local storage, environment fallback |
 | **React** | `useChat`, `useStream`, and a bridge client via `modelhitch/react` |
-| **Bridge** | OpenAI Chat/Responses, Anthropic Messages, and Gemini GenerateContent wires |
+| **Bridge** | OpenAI Chat/Responses/Images, Anthropic Messages, and Gemini GenerateContent wires |
 | **Reliability** | Automatic 429/5xx/network failover across models and providers |
 | **Usage** | Tokens, estimated spend, latency, failovers, dashboard, optional SQLite |
 
@@ -103,7 +103,8 @@ npx modelhitch status
 
 Point compatible clients at `http://127.0.0.1:3939/v1`, then route models as
 `providerId/modelId`. The bridge includes automatic failover and a local usage dashboard at
-`http://127.0.0.1:3939/usage`.
+`http://127.0.0.1:3939/usage`. Its OpenAI-compatible image lane is disabled by default and can be
+enabled from `http://127.0.0.1:3939/settings` or with `--image-lane`.
 
 > The packaged bridge uses SQLite persistence and requires Node.js 22.5+. The application library
 > supports Node.js 18+.

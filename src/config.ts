@@ -45,7 +45,7 @@ export interface ImageGenerationConfig {
   /** Enable the dedicated image generation lane. Disabled by default. */
   enabled: boolean;
   /** Provider chosen for image generation; OpenAI is the default supported route. */
-  providerId?: 'openai' | 'gemini' | 'huggingface';
+  providerId?: 'openai' | 'gemini';
   /** Model alias for the image lane. */
   model?: string;
   /** Preferred image quality. */
@@ -202,8 +202,8 @@ export function validateConfig(config: unknown): ConfigValidation {
       errors.push('imageGeneration must be an object.');
     } else {
       if (typeof i.enabled !== 'boolean') errors.push('imageGeneration.enabled must be a boolean.');
-      if (i.providerId !== undefined && !['openai', 'gemini', 'huggingface'].includes(i.providerId)) {
-        errors.push('imageGeneration.providerId must be one of "openai", "gemini", or "huggingface".');
+      if (i.providerId !== undefined && !['openai', 'gemini'].includes(i.providerId)) {
+        errors.push('imageGeneration.providerId must be either "openai" or "gemini".');
       }
       if (i.model !== undefined && (typeof i.model !== 'string' || !i.model.trim())) {
         errors.push('imageGeneration.model must be a non-empty string when set.');
@@ -213,6 +213,15 @@ export function validateConfig(config: unknown): ConfigValidation {
       }
       if (i.size !== undefined && (typeof i.size !== 'string' || !i.size.trim())) {
         errors.push('imageGeneration.size must be a non-empty string when set.');
+      }
+      if (i.providerId === 'openai' && i.model !== undefined && !['gpt-image-2', 'gpt-image-1.5'].includes(i.model)) {
+        errors.push('OpenAI imageGeneration.model must be "gpt-image-2" or "gpt-image-1.5".');
+      }
+      if (i.providerId === 'openai' && i.model === 'gpt-image-1.5' && i.quality !== undefined && i.quality !== 'medium') {
+        errors.push('gpt-image-1.5 is restricted to medium quality in the image lane.');
+      }
+      if (i.providerId === 'openai' && i.model === 'gpt-image-2' && i.quality === 'high') {
+        errors.push('gpt-image-2 is restricted to low or medium quality in the image lane.');
       }
     }
   }
