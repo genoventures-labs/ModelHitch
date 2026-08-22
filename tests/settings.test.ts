@@ -53,6 +53,13 @@ describe('config validity + serialization', () => {
     expect(validateConfig({ keys: 'sk-foo' }).errors.join('\n')).toMatch(/object/);
   });
 
+  it('image generation is disabled by default and validates when enabled', () => {
+    const tpl = defaultConfigTemplate();
+    expect(tpl.imageGeneration).toMatchObject({ enabled: false });
+    expect(validateConfig({ version: 1, imageGeneration: { enabled: true, providerId: 'openai' } }).errors).toEqual([]);
+    expect(validateConfig({ version: 1, imageGeneration: { enabled: true, providerId: 'unknown' } }).errors.join('\n')).toMatch(/providerId/);
+  });
+
   it('maskSecret + serializeConfig hide plaintext keys', () => {
     expect(maskSecret('sk-abc123')).toBe('••••••c123');
     expect(maskSecret('short')).toBe('••••••hort'); // 5 chars: bullets + last 4
@@ -202,6 +209,29 @@ describe('settings bridge endpoints', () => {
     expect(doc).toMatchObject({ version: 1, defaultProviderId: 'mock' });
     expect((doc as { keys: Record<string, string> }).keys?.mock).toContain('••••');
     expect((doc as { keys: Record<string, string> }).keys?.mock).not.toContain('sk-mock-secret');
+  });
+
+  it('POST /v1/images/generations is blocked while the image lane is off', async () => {
+    const server = createModelHitchServer({
+      defaultProviderId: 'mock',
+      configBridge: {
+        getConfig: () => serializeConfig(defaultConfigTemplate(), { maskSecrets: true }),
+        updateConfig: async () => ({ ok: true }),
+      },
+    });
+    const info = await server.listen(0, '127.0.0.1');
+    try {
+      const res = await fetch(`${info.url}/v1/images/generations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-image-1', prompt: 'A minimal icon' }),
+      });
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error.message).toMatch(/image lane/i);
+    } finally {
+      await server.close();
+    }
   });
 
   it('GET /v1/lane-health returns [] with no failures yet', async () => {

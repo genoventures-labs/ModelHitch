@@ -147,6 +147,47 @@ export function settingsPageHtml(): string {
   </section>
 
   <section>
+    <div class="section-head"><h2>Image lane</h2><span class="hint">disabled by default; opt in when you want a dedicated image-generation route</span></div>
+    <div class="panel">
+      <div class="row" style="border-bottom:0">
+        <div class="grow">
+          <label>enabled</label>
+          <select id="imageEnabled">
+            <option value="false">disabled</option>
+            <option value="true">enabled</option>
+          </select>
+        </div>
+        <div class="grow">
+          <label>provider</label>
+          <select id="imageProvider">
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="huggingface">Hugging Face</option>
+          </select>
+        </div>
+        <div class="grow">
+          <label>model</label>
+          <input id="imageModel" type="text" placeholder="gpt-image-1" />
+        </div>
+      </div>
+      <div class="row" style="border-bottom:0">
+        <div class="grow">
+          <label>quality</label>
+          <select id="imageQuality">
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </div>
+        <div class="grow">
+          <label>size</label>
+          <input id="imageSize" type="text" placeholder="1024x1024" />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
     <div class="section-head"><h2>Policy</h2><span class="hint">trusted lanes first, fallback lanes after — the lane is the trust object</span></div>
     <div class="panel lane-list">
       <div class="lbl">trusted</div>
@@ -373,6 +414,28 @@ function laneRow(lane, group) {
   return row;
 }
 
+function renderImageGeneration() {
+  var cfg = state.config || {};
+  var image = cfg.imageGeneration || { enabled: false, providerId: 'openai', model: 'gpt-image-1', quality: 'medium', size: '1024x1024' };
+  el('imageEnabled').value = String(!!image.enabled);
+  el('imageProvider').value = image.providerId || 'openai';
+  el('imageModel').value = image.model || 'gpt-image-1';
+  el('imageQuality').value = image.quality || 'medium';
+  el('imageSize').value = image.size || '1024x1024';
+}
+
+function collectImageGeneration() {
+  var enabled = el('imageEnabled').value === 'true';
+  var cfg = {
+    enabled: enabled,
+    providerId: el('imageProvider').value || 'openai',
+    model: el('imageModel').value.trim() || 'gpt-image-1',
+    quality: el('imageQuality').value || 'medium',
+    size: el('imageSize').value.trim() || '1024x1024',
+  };
+  return enabled ? cfg : { enabled: false, providerId: cfg.providerId, model: cfg.model, quality: cfg.quality, size: cfg.size };
+}
+
 function renderPolicy() {
   var cfg = state.config || {};
   var policy = cfg.policy || { trusted: [], fallback: [] };
@@ -475,6 +538,7 @@ function assemble() {
     policy: collectPolicy(),
     catalog: catalogChoice ? { providers: catalogChoice, baseUrls: (cfg.catalog && cfg.catalog.baseUrls) || undefined, ttlMs: (cfg.catalog && cfg.catalog.ttlMs) || undefined } : undefined,
     cooldown: collectReliability(),
+    imageGeneration: collectImageGeneration(),
     keys: collectKeys()
   };
 }
@@ -485,7 +549,7 @@ async function loadAll() {
     var cat = await api('/v1/catalog');
     state.catalog = cat.providers || [];
     state.builtin = cat.builtin || [];
-    renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
+    renderImageGeneration(); renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
     refreshHealth();
   } catch (err) {
     showErrors(['Failed to load settings: ' + err.message]);

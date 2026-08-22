@@ -63,6 +63,7 @@ import {
 import { clearConversations, findConversationWithToolCall, rememberConversation } from './conversation-state.js';
 import { normalizeBodyImages } from './local-images.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
+import type { ImageGenerationConfig } from '../config.js';
 
 export interface ModelHitchServerOptions {
   /** Providers to serve. Defaults to the built-in set. */
@@ -73,6 +74,8 @@ export interface ModelHitchServerOptions {
   defaultProviderId?: string;
   /** Default model when the request omits one. */
   defaultModel?: string;
+  /** Dedicated image lane config, disabled by default. */
+  imageGeneration?: ImageGenerationConfig;
   /** Per-provider API key overrides, e.g. `{ 'opencode-zen': 'sk-...' }`. */
   apiKeys?: Record<string, string>;
   /** Per-provider base URL overrides. */
@@ -193,6 +196,7 @@ export class OpenAICompatibleServer {
   private httpServer: Server | null = null;
   private usageTracker: UsageTracker;
   private ownsUsageTracker = false;
+  private imageGeneration: ImageGenerationConfig | undefined;
   private policy: Policy | undefined;
   private cooldown: LaneCooldown | undefined;
   private source: ProviderSource;
@@ -201,6 +205,7 @@ export class OpenAICompatibleServer {
   constructor(options: ModelHitchServerOptions = {}) {
     this.options = options;
     this.providers = options.providers ?? defaultProviders;
+    this.imageGeneration = options.imageGeneration;
     this.catalogSource = options.catalogSource;
     this.source = this.catalogSource ?? createRegistrySource(this.providers);
     this.policy = options.policy;
@@ -241,6 +246,7 @@ export class OpenAICompatibleServer {
     baseUrls?: Record<string, string>;
     defaultProviderId?: string;
     defaultModel?: string;
+    imageGeneration?: ImageGenerationConfig;
     keystore?: KeyStore;
     staticModels?: Record<string, string[]>;
   }): void {
@@ -271,6 +277,10 @@ export class OpenAICompatibleServer {
     if (partial.baseUrls !== undefined) this.options.baseUrls = partial.baseUrls;
     if (partial.defaultProviderId !== undefined) this.options.defaultProviderId = partial.defaultProviderId;
     if (partial.defaultModel !== undefined) this.options.defaultModel = partial.defaultModel;
+    if (partial.imageGeneration !== undefined) {
+      this.imageGeneration = partial.imageGeneration;
+      this.options.imageGeneration = partial.imageGeneration;
+    }
     if (partial.keystore !== undefined) this.options.keystore = partial.keystore;
     if (partial.staticModels !== undefined) this.options.staticModels = partial.staticModels;
   }
@@ -345,6 +355,12 @@ export class OpenAICompatibleServer {
     if (method === 'POST' && path === '/v1/chat/completions') {
       this.log(`${method} ${path} ->`);
       await this.handleChat(req, res);
+      return;
+    }
+
+    if (method === 'POST' && path === '/v1/images/generations') {
+      this.log(`${method} ${path} ->`);
+      await this.handleImageGeneration(req, res);
       return;
     }
 
@@ -522,6 +538,101 @@ export class OpenAICompatibleServer {
   // ---------------------------------------------------------------------------
   // Chat completions
   // ---------------------------------------------------------------------------
+
+  private async handleImageGeneration(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = (await this.readBody(req)) as Record<string, unknown> | null;
+    if (!this.imageGeneration?.enabled) {
+      throw new ModelHitchError(
+        'forbidden',
+        'The image lane is disabled by default. Enable it in /settings or with modelhitch bridge --image-lane.',
+        { status: 403 },
+      );
+    }
+    const prompt = typeof body?.prompt === 'string' ? body.prompt.trim() : '';
+    if (!prompt) {
+      throw new ModelHitchError('bad-request', "The request body must include a non-empty 'prompt'.", { status: 400 });
+    }
+    const cfg = this.imageGeneration;
+    const providerId = (typeof body?.providerId === 'string' && body.providerId) || (typeof body?.provider === 'string' && body.provider) || cfg.providerId || 'openai';
+    const provider = this.providerFor(providerId) ?? this.providers.find((p) => p.id === providerId);
+    if (!provider) {
+      throw new ModelHitchError('bad-request', `Image lane provider "${providerId}" is unavailable.`, { status: 400, providerId });
+    }
+    const model = (typeof body?.model === 'string' && body.model.trim()) || cfg.model || provider.defaultModel;
+    const quality = (typeof body?.quality === 'string' && body.quality) || cfg.quality || 'medium';
+    const size = (typeof body?.size === 'string' && body.size.trim()) || cfg.size || '1024x1024';
+    const count = Number.isInteger(body?.n) ? Math.max(1, Number(body.n)) : 1;
+    const responseFormat = body?.response_format === 'b64_json' ? 'b64_json' : 'url';
+
+    const credentials = await this.resolveCredentials(providerId);
+    const base = (credentials.baseUrl ?? {
+      openai: 'https://api.openai.com/v1',
+      gemini: 'https://generativelanguage.googleapis.com/v1beta',
+      huggingface: 'https://router.huggingface.co/v1',
+    }[providerId] ?? 'https://api.openai.com/v1').replace(/\/+$/, '');
+
+    let payload: Record<string, unknown>;
+    if (providerId === 'gemini') {
+      payload = {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+      };
+    } else {
+      payload = {
+        model,
+        prompt,
+        n: count,
+        size,
+        quality,
+        response_format: responseFormat,
+      };
+    }
+
+    const url = providerId === 'gemini'
+      ? `${base}/models/${encodeURIComponent(model)}:generateContent`
+      : `${base}/images/generations`;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (providerId === 'gemini') {
+      const apiKey = credentials.apiKey ?? process.env.GEMINI_API_KEY;
+      if (!apiKey) throw new ModelHitchError('missing-api-key', 'Gemini image generation requires a Gemini API key.', { status: 401, providerId });
+      headers['x-goog-api-key'] = apiKey;
+    } else {
+      const apiKey = credentials.apiKey ?? process.env.OPENAI_API_KEY ?? process.env.HF_TOKEN;
+      if (!apiKey) {
+        throw new ModelHitchError('missing-api-key', `Image generation for "${providerId}" requires a configured API key.`, { status: 401, providerId });
+      }
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+
+    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new ModelHitchError(
+        providerId === 'huggingface' ? 'provider-error' : 'provider-error',
+        `Image generation via "${providerId}" failed: ${text || 'unknown upstream error'}`,
+        { status: response.status, providerId },
+      );
+    }
+
+    const data = safeJsonParse<Record<string, unknown>>(text, {});
+    let imageData: Array<{ b64_json?: string; url?: string; revised_prompt?: string }> = [];
+    if (providerId === 'gemini') {
+      const parts = ((data.candidates as Array<{ content?: { parts?: Array<{ inlineData?: { data?: string; mimeType?: string }; text?: string }> } }> | undefined) ?? [])[0]?.content?.parts ?? [];
+      imageData = parts
+        .filter((part) => part && part.inlineData && typeof part.inlineData.data === 'string')
+        .map((part) => ({ b64_json: part.inlineData!.data, revised_prompt: parts.map((p) => p.text).filter(Boolean).join('\n') || undefined }));
+    } else {
+      imageData = Array.isArray(data.data) ? data.data.map((item) => ({
+        url: typeof item?.url === 'string' ? item.url : undefined,
+        b64_json: typeof item?.b64_json === 'string' ? item.b64_json : undefined,
+        revised_prompt: typeof item?.revised_prompt === 'string' ? item.revised_prompt : undefined,
+      })) : [];
+    }
+    if (!imageData.length) {
+      throw new ModelHitchError('provider-error', `Image generation via "${providerId}" returned no image payload.`, { status: 502, providerId });
+    }
+    this.sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data: imageData });
+  }
 
   private async handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = (await this.readBody(req)) as OpenAIChatRequest | null;

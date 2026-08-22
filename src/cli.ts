@@ -147,20 +147,28 @@ function argValue(args: string[], flag: string): string | undefined {
   return value && !value.startsWith('--') ? value : undefined;
 }
 
+function argsHasFlag(flags: string[]): boolean {
+  return flags.some((flag) => process.argv.includes(flag));
+}
+
 function usage(): void {
   console.log(`ModelHitch v${VERSION} — plug-and-play BYOK integration layer.
   hitched at https://github.com/genoventures-labs/ModelHitch
 
 Usage:
-  modelhitch                print the logo, version, and this help
-  modelhitch bridge         start the local OpenAI-compatible bridge server
-  modelhitch bridge --background   start it in the background (terminal stays free)
-  modelhitch status         is a background bridge running?
-  modelhitch front          stop the background one, run the bridge in this terminal
-  modelhitch stop           stop the background bridge
-  modelhitch setup <agent>  install skills for codex, claude, cursor, vscode, or all
-  modelhitch --version      print the version
-  modelhitch --help         print this help
+  modelhitch                                     print the logo, version, and this help
+  modelhitch bridge                              start the local OpenAI-compatible bridge server
+  modelhitch bridge --background                  start it in the background (terminal stays free)
+  modelhitch bridge --image-lane                  enable the dedicated image generation lane
+  modelhitch bridge --no-image-lane               disable the image generation lane
+  modelhitch bridge --image-provider openai       set the image lane provider (openai|gemini|huggingface)
+  modelhitch bridge --image-model gpt-image-1     set the default image model
+  modelhitch status                              is a background bridge running?
+  modelhitch front                               stop the background one, run the bridge in this terminal
+  modelhitch stop                                stop the background bridge
+  modelhitch setup <agent>                       install skills for codex, claude, cursor, vscode, or all
+  modelhitch --version                           print the version
+  modelhitch --help                              print this help
 
 Background process:
   tracked in ~/.modelhitch (bridge.pid + bridge.log, override with MODELHITCH_HOME)
@@ -176,6 +184,7 @@ Bridge environment:
   MODELHITCH_PORT           port (default 3939)
   MODELHITCH_HOST           host (default 127.0.0.1)
   MODELHITCH_MAX_BODY_BYTES max request body (default 64 MiB)
+  Image generation is disabled by default; enable it via CLI flags or /settings.
 `);
 }
 
@@ -190,6 +199,11 @@ async function runBridge(): Promise<void> {
   const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
   const maxBodyBytes = Number(process.env.MODELHITCH_MAX_BODY_BYTES ?? 64 * 1024 * 1024);
   const configPath = flagValue('--config') ?? defaultConfigPath();
+  const imageFlag = argsHasFlag(['--image-lane', '--image-generation']) ? true : argsHasFlag(['--no-image-lane', '--no-image-generation']) ? false : undefined;
+  const imageProvider = flagValue('--image-provider') ?? undefined;
+  const imageModel = flagValue('--image-model') ?? undefined;
+  const imageQuality = flagValue('--image-quality') ?? undefined;
+  const imageSize = flagValue('--image-size') ?? undefined;
 
   const loaded = readConfigFile(configPath); // null when none exists yet
   if (loaded) {
@@ -201,6 +215,17 @@ async function runBridge(): Promise<void> {
     }
   }
   const config: ModelHitchConfig = loaded ?? defaultConfigTemplate();
+  if (imageFlag !== undefined) {
+    config.imageGeneration = {
+      enabled: imageFlag,
+      providerId: imageProvider && ['openai', 'gemini', 'huggingface'].includes(imageProvider as string)
+        ? (imageProvider as 'openai' | 'gemini' | 'huggingface')
+        : config.imageGeneration?.providerId ?? 'openai',
+      model: imageModel ?? config.imageGeneration?.model ?? 'gpt-image-1',
+      quality: imageQuality && ['low', 'medium', 'high'].includes(imageQuality) ? (imageQuality as 'low' | 'medium' | 'high') : config.imageGeneration?.quality ?? 'medium',
+      size: imageSize ?? config.imageGeneration?.size ?? '1024x1024',
+    };
+  }
   // Merge env-sourced keys so a bridge without a written keys block still works
   // (and the settings UI can show which providers already have credentials).
   config.keys = keysFromEnv(config.keys ?? {});
@@ -235,6 +260,7 @@ async function runBridge(): Promise<void> {
     providers,
     defaultProviderId: config.defaultProviderId ?? 'opencode-zen',
     defaultModel: config.defaultModel,
+    imageGeneration: config.imageGeneration,
     staticModels: {
       'opencode-zen': [...OPENCODE_ZEN_MODELS],
       'opencode-go': [...OPENCODE_GO_MODELS],
@@ -281,7 +307,7 @@ async function runBridge(): Promise<void> {
         // Apply immediately — hot reload. Optional fields absent from the
         // incoming document must be cleared first: Object.assign alone would
         // keep stale values (e.g. a catalog block the UI just unchecked).
-        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'cooldown'] as const) {
+        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'cooldown', 'imageGeneration'] as const) {
           delete (config as unknown as Record<string, unknown>)[k];
         }
         Object.assign(config, asConfig);
@@ -300,6 +326,7 @@ async function runBridge(): Promise<void> {
               apiKeys: config.keys,
               defaultProviderId: config.defaultProviderId,
               defaultModel: config.defaultModel,
+              imageGeneration: config.imageGeneration,
             });
           } else if (!wantsCatalog && catalogSource) {
             // Catalog mode switched off — fall back to the built-in registry.
@@ -312,6 +339,7 @@ async function runBridge(): Promise<void> {
               apiKeys: config.keys,
               defaultProviderId: config.defaultProviderId,
               defaultModel: config.defaultModel,
+              imageGeneration: config.imageGeneration,
             });
           } else {
             server.reconfigure({
@@ -322,6 +350,7 @@ async function runBridge(): Promise<void> {
               baseUrls: config.catalog?.baseUrls,
               defaultProviderId: config.defaultProviderId,
               defaultModel: config.defaultModel,
+              imageGeneration: config.imageGeneration,
             });
           }
         } catch (err) {

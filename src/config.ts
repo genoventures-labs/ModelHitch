@@ -41,6 +41,19 @@ export type CooldownConfig =
   | ({ type: 'circuit-breaker' } & CircuitBreakerOptions)
   | ({ type: 'memory' } & MemoryLaneCooldownOptions);
 
+export interface ImageGenerationConfig {
+  /** Enable the dedicated image generation lane. Disabled by default. */
+  enabled: boolean;
+  /** Provider chosen for image generation; OpenAI is the default supported route. */
+  providerId?: 'openai' | 'gemini' | 'huggingface';
+  /** Model alias for the image lane. */
+  model?: string;
+  /** Preferred image quality. */
+  quality?: 'low' | 'medium' | 'high';
+  /** Preferred output size, e.g. `1024x1024`. */
+  size?: string;
+}
+
 export interface ModelHitchConfig {
   /** Document version — currently 1. */
   version: 1;
@@ -54,6 +67,8 @@ export interface ModelHitchConfig {
   catalog?: CatalogConfig;
   /** Lane-health engine: circuit breaker or memory cooldown. */
   cooldown?: CooldownConfig;
+  /** Dedicated image-generation lane (kind of like a special failover lane). */
+  imageGeneration?: ImageGenerationConfig;
   /** Per-provider API keys. Persisted locally; masked on read. */
   keys?: Record<string, string>;
 }
@@ -177,6 +192,27 @@ export function validateConfig(config: unknown): ConfigValidation {
         if (c.maxTripMs !== undefined && c.baseTripMs !== undefined && c.maxTripMs < c.baseTripMs) {
           errors.push('cooldown.maxTripMs must be >= cooldown.baseTripMs.');
         }
+      }
+    }
+  }
+
+  if (cfg.imageGeneration !== undefined) {
+    const i = cfg.imageGeneration;
+    if (!i || typeof i !== 'object') {
+      errors.push('imageGeneration must be an object.');
+    } else {
+      if (typeof i.enabled !== 'boolean') errors.push('imageGeneration.enabled must be a boolean.');
+      if (i.providerId !== undefined && !['openai', 'gemini', 'huggingface'].includes(i.providerId)) {
+        errors.push('imageGeneration.providerId must be one of "openai", "gemini", or "huggingface".');
+      }
+      if (i.model !== undefined && (typeof i.model !== 'string' || !i.model.trim())) {
+        errors.push('imageGeneration.model must be a non-empty string when set.');
+      }
+      if (i.quality !== undefined && !['low', 'medium', 'high'].includes(i.quality)) {
+        errors.push('imageGeneration.quality must be "low", "medium", or "high".');
+      }
+      if (i.size !== undefined && (typeof i.size !== 'string' || !i.size.trim())) {
+        errors.push('imageGeneration.size must be a non-empty string when set.');
       }
     }
   }

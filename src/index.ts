@@ -79,6 +79,7 @@ export {
   type CatalogConfig,
   type CooldownConfig,
   type ConfigValidation,
+  type ImageGenerationConfig,
   type MaskedConfig,
   type ModelHitchConfig,
 } from './config.js';
