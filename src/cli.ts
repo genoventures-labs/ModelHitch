@@ -8,6 +8,7 @@
  *   modelhitch status     is a background bridge running?
  *   modelhitch front      stop the background one and run the bridge in this terminal
  *   modelhitch stop       stop the background bridge
+ *   modelhitch settings   edit local settings in an OpenTUI terminal interface
  *   modelhitch setup codex  install the ModelHitch skill for Codex
  *   modelhitch --version  print the version
  *   modelhitch --help     print help
@@ -18,9 +19,11 @@
  *   MODELHITCH_MAX_BODY_BYTES  max request body for the bridge (default 64 MiB)
  *   MODELHITCH_HOME       directory for the background pid/log (default ~/.modelhitch)
  */
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { printAsciiLogo } from './ascii.js';
 import { createModelHitchServer } from './server/server.js';
 import { OPENCODE_GO_MODELS, OPENCODE_ZEN_MODELS } from './providers/opencode.js';
@@ -166,6 +169,8 @@ Usage:
   modelhitch status                              is a background bridge running?
   modelhitch front                               stop the background one, run the bridge in this terminal
   modelhitch stop                                stop the background bridge
+  modelhitch settings                            edit local config in an OpenTUI interface
+  modelhitch settings --config <path>            edit a specific config file
   modelhitch setup <agent>                       install skills for codex, claude, cursor, vscode, or all
   modelhitch --version                           print the version
   modelhitch --help                              print this help
@@ -520,10 +525,25 @@ async function runConfig(args: string[]): Promise<void> {
   console.log(JSON.stringify(serializeConfig(existing, { maskSecrets: true }), null, 2));
 }
 
+function runSettings(args: string[]): void {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error('The settings TUI requires an interactive terminal.');
+  }
+  const configPath = argValue(args, '--config') ?? argValue(args, '--path') ?? defaultConfigPath();
+  const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
+  const tuiPath = fileURLToPath(new URL(`./settings-tui.${extension}`, import.meta.url));
+  const result = spawnSync('bun', [tuiPath, '--config', configPath], { stdio: 'inherit' });
+  if (result.error && (result.error as NodeJS.ErrnoException).code === 'ENOENT') {
+    throw new Error('OpenTUI requires Bun for this Node version. Install Bun from https://bun.sh, then run `modelhitch settings` again.');
+  }
+  if (result.error) throw result.error;
+  if (result.status !== 0) process.exitCode = result.status ?? 1;
+}
+
 async function main(): Promise<void> {
-  printAsciiLogo();
   const args = process.argv.slice(2);
   const [cmd] = args;
+  if (cmd !== 'settings') printAsciiLogo();
   switch (cmd) {
     case undefined:
     case '-h':
@@ -555,6 +575,9 @@ async function main(): Promise<void> {
       break;
     case 'config':
       await runConfig(args.slice(1));
+      break;
+    case 'settings':
+      runSettings(args.slice(1));
       break;
     default:
       console.log(`Unknown command: ${cmd}\n`);

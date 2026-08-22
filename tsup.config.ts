@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/browser.ts', 'src/react/index.ts', 'src/cli.ts'],
+  entry: ['src/index.ts', 'src/browser.ts', 'src/react/index.ts', 'src/cli.ts', 'src/settings-tui.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   sourcemap: true,
@@ -12,6 +12,6 @@ export default defineConfig({
   // ESM and CJS builds (and the browser entry) keep working for consumers.
   // React stays a peer dependency of the `modelhitch/react` entry — never
   // bundle it.
-  external: ['react', 'react/jsx-runtime'],
+  external: ['react', 'react/jsx-runtime', '@opentui/core'],
   noExternal: ['mdev-sdk'],
 });

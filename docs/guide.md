@@ -156,6 +156,7 @@ their native wires.
 npx modelhitch bridge
 npx modelhitch bridge --background
 npx modelhitch status
+npx modelhitch settings
 npx modelhitch front
 npx modelhitch stop
 ```
@@ -182,6 +183,23 @@ nonempty `apiKey` field before they will send a request. The bridge resolves cre
 and ignores the incoming Authorization header, so you can supply any harmless bridge-local
 placeholder such as `sk-bridge-local` — never a real user key — solely to satisfy that client-side
 validation.
+
+### Terminal settings
+
+Run `modelhitch settings` to edit the local config without starting the bridge or opening a browser.
+The OpenTUI interface covers default routing, the image lane, and cooldown behavior. Use Tab and
+Shift+Tab to move, Left/Right to choose values, Ctrl+S to validate and save, and Escape to close.
+
+```bash
+modelhitch settings
+modelhitch settings --config ./modelhitch.config.json
+```
+
+The TUI writes the same JSON document as `/settings` and preserves policy lanes, catalog choices,
+and API keys that are outside its current editing surface. Secrets remain intentionally excluded
+from visible terminal inputs; configure them through environment variables or the local web UI.
+OpenTUI currently requires Bun for this command. The bridge, library, and other CLI commands retain
+their existing Node.js runtime support.
 
 ### Image generation
 

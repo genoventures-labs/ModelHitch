@@ -99,12 +99,18 @@ or `--force` to update an existing install.
 ```bash
 npx modelhitch bridge --background
 npx modelhitch status
+npx modelhitch settings
 ```
 
 Point compatible clients at `http://127.0.0.1:3939/v1`, then route models as
 `providerId/modelId`. The bridge includes automatic failover and a local usage dashboard at
 `http://127.0.0.1:3939/usage`. Its OpenAI-compatible image lane is disabled by default and can be
 enabled from `http://127.0.0.1:3939/settings` or with `--image-lane`.
+
+`modelhitch settings` opens an OpenTUI editor for routing, image-generation, and reliability
+settings without requiring the bridge or web UI. It edits the same local config file and preserves
+policy lanes, catalog choices, and API keys. The TUI currently requires Bun; all other ModelHitch
+commands retain their existing Node.js runtime support.
 
 > The packaged bridge uses SQLite persistence and requires Node.js 22.5+. The application library
 > supports Node.js 18+.
